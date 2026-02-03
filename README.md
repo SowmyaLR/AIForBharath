@@ -2,7 +2,10 @@
 
 ### "Hearing the Unheard: An Agentic AI that Listens, Reasons, and Triage’s for Billion-Scale Healthcare."
 
+<img width="1024" height="1024" alt="Gemini_Generated_Image_ufttwhufttwhuftt" src="https://github.com/user-attachments/assets/af0d0a57-03e7-4cd4-b3f4-4f0dfbb043b2" />
+
 ___
+
 
 India faces a staggering doctor-patient ratio of 1:834 (well below WHO standards). In rural telemedicine and crowded OPDs, two critical bottlenecks exist:
 
@@ -20,6 +23,10 @@ It Listens (Acoustic Analysis): Using heuristics inspired by Google's HeAR, it a
 It Reasons (Medical LLM): Powered by MedGemma 4B (local inference), it understands complex medical history and symptoms.
 
 It Acts (Documentation): It autonomously drafts professional SOAP Notes and flags high-risk cases for immediate attention.
+
+## Demo
+
+[![Watch the demo](https://img.youtube.com/vi/0F5j3puTxPI/0.jpg)](https://www.youtube.com/watch?v=0F5j3puTxPI)
 
 ---
 
