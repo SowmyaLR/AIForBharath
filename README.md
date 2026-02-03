@@ -32,8 +32,6 @@ This project directly addresses **two critical crises** in modern healthcare:
 
 ---
 
----
-
 ## How It Works (Technical Excellence)
 We built a privacy-first, hybrid AI architecture:
 
@@ -55,28 +53,28 @@ Output: The Doctor Dashboard (FastAPI) presents a prioritized queue, ensuring cr
 ```mermaid
 graph TD
     %% Users
-    Patient([👤 Patient])
-    Doctor([👨‍⚕️ Doctor])
+    Patient(["👤 Patient"])
+    Doctor(["👨‍⚕️ Doctor"])
 
     %% Frontend
     subgraph Frontend [Next.js Client]
-        P_Portal[Patient Portal]
-        D_Portal[Doctor Dashboard]
+        P_Portal["Patient Portal"]
+        D_Portal["Doctor Dashboard"]
     end
 
     %% Backend
     subgraph Backend [FastAPI Server]
-        Router[API Router]
+        Router["API Router"]
         
         subgraph Processing [AI Processing Pipeline]
-            Whisper[🗣️ Whisper ASR<br/>(Speech-to-Text)]
-            Librosa[🌊 Acoustic Analysis<br/>(Breathing/Cough Detection)]
-            MedGemma[🧠 MedGemma 4B<br/>(Clinical Reasoning)]
+            Whisper["🗣️ Whisper ASR<br/>(Speech-to-Text)"]
+            Librosa["🌊 Acoustic Analysis<br/>(Breathing/Cough Detection)"]
+            MedGemma["🧠 MedGemma 4B<br/>(Clinical Reasoning)"]
         end
     end
 
     %% External/Local Service
-    Ollama[🦙 Ollama Local Inference]
+    Ollama["🦙 Ollama Local Inference"]
 
     %% Connections
     Patient -->|Voice/Symptom Input| P_Portal
