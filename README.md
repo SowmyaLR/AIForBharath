@@ -42,17 +42,16 @@ This project directly addresses **two critical crises** in modern healthcare:
 ## How It Works (Technical Excellence)
 We built a privacy-first, hybrid AI architecture:
 
-Input: Patient speaks naturally (voice) via the Next.js frontend.
+**Input**: Patient speaks naturally (voice) via the Next.js frontend.
 
-Perception Layer:
+**Perception Layer:**
 ASR: Whisper converts speech to text, handling diverse accents.
 Bio-Acoustics: Python librosa extracts signal energy and zero-crossing rates to quantify "respiratory distress" (simulating HeAR capabilities).
 
-Reasoning Layer:
+**Reasoning Layer:**
 MedGemma 4B (via Ollama) ingests the transcript + acoustic risk scores.
 It synthesizes a structured clinical summary and assigns a Triage Priority Level.
 Output: The Doctor Dashboard (FastAPI) presents a prioritized queue, ensuring critical patients are seen first.
----
 
 ---
 ## 🏗️ High-Level Architecture
