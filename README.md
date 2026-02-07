@@ -1,16 +1,19 @@
-# Tele-Triage (Agentic AI for Healthcare)
+# Tele-Triage (Clinical Workflow Assistant)
 
-### "Hearing the Unheard: An Agentic AI that Listens, Reasons, and Triage’s for Billion-Scale Healthcare."
+### "Hearing the Unheard: An Agentic AI that Listens, Reasons, and Supports Triage for Billion-Scale Healthcare."
 
 <img width="1024" height="1024" alt="Gemini_Generated_Image_ufttwhufttwhuftt" src="https://github.com/user-attachments/assets/af0d0a57-03e7-4cd4-b3f4-4f0dfbb043b2" />
 
 ___
 
+> **⚠️ DISCLAIMER:** Tele-Triage is a workflow optimization tool designed to Assist clinicians, NOT replace them. It provides triage suggestions based on acoustic and textual analysis. It does NOT provide medical diagnoses. In case of emergency, standard protocols must be followed.
+
+___
 
 India faces a staggering doctor-patient ratio of 1:834 (well below WHO standards). In rural telemedicine and crowded OPDs, two critical bottlenecks exist:
 
-Triage Overload: Nurses manually screen thousands of calls, often missing subtle distress signals due to volume and fatigue.
-Documentation Burnout: Doctors spend ~50% of their time typing SOAP notes instead of treating patients.
+1.  **Triage Overload**: Nurses manually screen thousands of calls, often missing subtle distress signals due to volume and fatigue.
+2.  **Documentation Burnout**: Doctors spend ~50% of their time typing SOAP notes instead of treating patients.
 
 ___
 
@@ -18,11 +21,9 @@ ___
 
 Unlike standard chatbots, Tele-Triage is Multi-Modal and Agentic:
 
-It Listens (Acoustic Analysis): Using heuristics inspired by Google's HeAR, it analyzes audio waveforms to detect respiratory distress (e.g., cough intensity, breathing patterns).
-
-It Reasons (Medical LLM): Powered by MedGemma 4B (local inference), it understands complex medical history and symptoms.
-
-It Acts (Documentation): It autonomously drafts professional SOAP Notes and flags high-risk cases for immediate attention.
+1.  **It Listens (Acoustic Screening)**: Using heuristics inspired by Google's HeAR, it screens audio waveforms to **flag** potential respiratory distress (e.g., cough intensity, breathing patterns) for human review.
+2.  **It Reasons (Medical LLM)**: Powered by MedGemma 4B (local inference), it structures complex patient history into clinical notes.
+3.  **It Supports (Documentation)**: It autonomously drafts professional SOAP Notes and suggests a Triage Priority Level for the doctor to approve.
 
 ## Demo
 
@@ -33,27 +34,48 @@ It Acts (Documentation): It autonomously drafts professional SOAP Notes and flag
 ## 🏥 Healthcare Impact
 This project directly addresses **two critical crises** in modern healthcare:
 
-1.  **Clinician Burnout**: Doctors spend up to **50% of their day** on EHR documentation (SOAP notes). Tele-Triage automates this, returning hours to patient care.
-2.  **Triage Bottlenecks**: In tele-health, nurses manually screen thousands of calls. Our "Agentic Workflow" acts as a **Level 1 Triage Agent**, autonomously flagging high-risk patients (e.g., detecting respiratory distress via cough sounds).
+1.  **Clinician Burnout**: Doctors spend up to **50% of their day** on EHR documentation (SOAP notes). Tele-Triage automates this draft, returning hours to patient care.
+2.  **Triage Efficiency**: In tele-health, nurses manually screen thousands of calls. Our "Agentic Workflow" acts as a **Level 1 Triage Assistant**, autonomously prioritizing high-risk patients based on reported symptoms and acoustic markers.
 
+---
+
+## 🛡️ Safety & Limitations
+We prioritize responsible AI deployment. This system is designed with specific guardrails:
+
+1.  **Not a Diagnostic Tool**: The system provides **suggestions** for triage priority. It does NOT diagnose diseases. All outputs require clinician validation.
+2.  **Privacy First**: All inference (Audio & LLM) runs **locally** on the device/server. No patient data is sent to external clouds, ensuring compliance with data privacy standards.
 
 ---
 
-## How It Works (Technical Excellence)
-We built a privacy-first, hybrid AI architecture:
+## Technical Architecture (Privacy-First)
 
-**Input**: Patient speaks naturally (voice) via the Next.js frontend.
+### **Hybrid AI Stack**
+-   **Reasoning Engine**: `MedGemma 4B` (running locally via **Ollama**).
+    -   *Why?* Ensures medical domain accuracy and data privacy (local inference).
+-   **ASR (Speech-to-Text)**: `Whisper` (via Python Transformers).
+    -   *Why?* Robust handling of medical terminology and diverse accents.
+-   **Acoustic Screening**: Python `librosa` based heuristics.
+    -   *Why?* Measures signal energy to **flag** "Abnormal Respiratory Sounds" for doctor review.
 
-**Perception Layer:**
-ASR: Whisper converts speech to text, handling diverse accents.
-Bio-Acoustics: Python librosa extracts signal energy and zero-crossing rates to quantify "respiratory distress" (simulating HeAR capabilities).
-
-**Reasoning Layer:**
-MedGemma 4B (via Ollama) ingests the transcript + acoustic risk scores.
-It synthesizes a structured clinical summary and assigns a Triage Priority Level.
-Output: The Doctor Dashboard (FastAPI) presents a prioritized queue, ensuring critical patients are seen first.
+### **Stack**
+-   **Frontend**: Next.js 14, Tailwind CSS (Patient & Doctor Portals).
+-   **Backend**: Python FastAPI.
+-   **Deployment**: Fully local (Privacy-first).
 
 ---
+
+## 🚀 How it Works
+1.  **Patient Interface**: Patient speaks naturally about their symptoms.
+2.  **Multi-Modal Analysis**:
+    -   The backend extracts the *text transcript*.
+    -   It simultaneously scans *audio waveforms* for high-energy events (potential distress).
+3.  **Agentic Reasoning**:
+    -   MedGemma receives the transcript + acoustic flags.
+    -   It drafts a **SOAP Note** (Subjective, Objective, Assessment, Plan).
+4.  **Clinician Review**: The doctor sees a prioritized queue. High-risk inputs are flagged. The doctor **reviews and edits** the note before finalizing.
+
+---
+
 ## 🏗️ High-Level Architecture
 
 ```mermaid
@@ -74,7 +96,7 @@ graph TD
         
         subgraph Processing [AI Processing Pipeline]
             Whisper["🗣️ Whisper ASR<br/>(Speech-to-Text)"]
-            Librosa["🌊 Acoustic Analysis<br/>(Breathing/Cough Detection)"]
+            Librosa["🌊 Acoustic Screening<br/>(Signal Energy Heuristics)"]
             MedGemma["🧠 MedGemma 4B<br/>(Clinical Reasoning)"]
         end
     end
@@ -90,12 +112,12 @@ graph TD
     Router --> Librosa
     
     Whisper -->|Transcript| MedGemma
-    Librosa -->|Acoustic Biomarkers| MedGemma
+    Librosa -->|Acoustic Flags| MedGemma
     
     MedGemma <-->|Llama 3/Gemma Weights| Ollama
     
-    MedGemma -->|SOAP Note & Triage Score| D_Portal
-    D_Portal -->|Review & Action| Doctor
+    MedGemma -->|Draft SOAP & Priority| D_Portal
+    D_Portal -->|Review & Approve| Doctor
     
     classDef user fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
     classDef component fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
@@ -105,35 +127,6 @@ graph TD
     class P_Portal,D_Portal,Router component;
     class Whisper,Librosa,MedGemma,Ollama ai;
 ```
-
----
-
-## ⚙️ Technical Architecture
-
-### **Hybrid AI Stack**
--   **Reasoning Engine**: `MedGemma 4B` (running locally via **Ollama**).
-    -   *Why?* Ensures medical domain accuracy and data privacy (local inference).
--   **ASR (Speech-to-Text)**: `Whisper` (via Python Transformers).
-    -   *Why?* Robust handling of medical terminology in speech.
--   **Acoustic Analysis**: Python `librosa` based heuristics (Simulating **HeAR**).
-    -   *Why?* Measures signal energy and zero-crossing rates to flag "Abnormal Respiratory Sounds".
-
-### **Stack**
--   **Frontend**: Next.js 14, Tailwind CSS (Patient & Doctor Portals).
--   **Backend**: Python FastAPI.
--   **Deployment**: Fully local (Privacy-first).
-
----
-
-## 🚀 How it Works
-1.  **Patient Interface**: Exploring the "Patient" mode, a user speaks naturally about their symptoms.
-2.  **Multi-Modal Analysis**:
-    -   The backend extracts the *text transcript*.
-    -   It simultaneously analyzes *audio waveforms* for distress signals.
-3.  **Agentic Reasoning**:
-    -   MedGemma receives the transcript + acoustic risk score.
-    -   It synthesizes a **SOAP Note** (Subjective, Objective, Assessment, Plan).
-4.  **Doctor Interface**: The clinician sees a sorted queue. High-risk inputs (acoustic or clinical) are prioritized.
 
 ---
 
