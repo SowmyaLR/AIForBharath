@@ -1,5 +1,8 @@
 # VaidyaSaarathi 🏥
 
+<img width="1024" height="1024" alt="vaidyasaarathi" src="https://github.com/user-attachments/assets/5ea831be-fb2a-47c9-8d4a-c9a90c51a23a" />
+
+
 > **Your Intelligent Healthcare Companion** - An AI Assistant Supporting Clinical Decisions, Not Replacing Them
 
 [![Privacy First](https://img.shields.io/badge/Privacy-First-green.svg)](https://www.hhs.gov/hipaa/index.html)
