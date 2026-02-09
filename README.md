@@ -219,8 +219,8 @@ AUDIO_STORAGE_PATH=/path/to/encrypted/storage
 
 ## 📖 Documentation
 
-- [Requirements Specification](.kiro/specs/tele-triage-2.0/requirements.md)
-- [Design Document](.kiro/specs/tele-triage-2.0/design.md)
+- [Requirements Specification](.kiro/specs/ai-tele-triage/requirements.md)
+- [Design Document](.kiro/specs/ai-tele-triage/design.md)
 - [API Documentation](docs/api.md) *(coming soon)*
 - [Deployment Guide](docs/deployment.md) *(coming soon)*
 - [User Manual](docs/user-manual.md) *(coming soon)*
