@@ -8,3 +8,7 @@ librosa
 soundfile
 numpy
 scipy
+python-jose[cryptography]
+bcrypt<4.0.0
+python-multipart
+passlib
