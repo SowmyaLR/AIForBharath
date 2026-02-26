@@ -7,8 +7,7 @@ VaidyaSaarathi is a clinical workflow solution that transforms patient intake an
 ## Glossary
 
 - **System**: The VaidyaSaarathi application
-- **Receptionist**: Healthcare staff responsible for patient registration and initial intake
-- **Nurse**: Clinical staff responsible for recording patient vitals and measurements
+- **Nurse Intake**: Healthcare staff responsible for patient registration, initial intake, and recording vitals.
 - **Doctor**: Medical specialist who reviews triage results and makes clinical decisions
 - **Patient**: Individual seeking medical care at the healthcare facility
 - **SOAP_Note**: Structured clinical documentation (Subjective, Objective, Assessment, Plan)
@@ -39,29 +38,16 @@ VaidyaSaarathi is a clinical workflow solution that transforms patient intake an
 6. WHERE a user has Doctor role, THE System SHALL grant access to specialist review, edit, and approval features
 7. WHEN a user attempts to access features outside their role permissions, THE System SHALL deny access and display an appropriate error message
 
-### Requirement 2: Patient Identification and History
-
-**User Story:** As a receptionist, I want to quickly identify patients and view their medical history, so that I can provide context-aware intake services.
-
-#### Acceptance Criteria
-
-1. WHEN a receptionist enters a Hospital_ID manually, THE System SHALL retrieve and display the patient's profile within 1 second
-2. WHEN a receptionist scans a QR_Code, THE System SHALL extract the Hospital_ID and retrieve the patient's profile within 1 second
-3. WHEN displaying a patient profile, THE System SHALL show the patient's name, demographics, and the last 3 to 5 visits with associated diagnoses
-4. IF a Hospital_ID does not exist in the system, THEN THE System SHALL display an error message indicating the patient was not found
-5. WHEN multiple identification methods are available, THE System SHALL accept both manual entry and QR code scanning interchangeably
-
-### Requirement 3: Multi-Language Patient Intake
-
-**User Story:** As a receptionist, I want to capture patient complaints in their native language using audio recording, so that language barriers do not impede quality care.
+### Requirement 2: Patient Identification and Intake
+**User Story:** As a Nurse Intake officer, I want to quickly identify patients, view their history, and capture their vitals/complaints in one go, so that I can provide a complete clinical profile to the doctor immediately.
 
 #### Acceptance Criteria
 
-1. WHEN a receptionist initiates patient intake, THE System SHALL display a microphone button for audio recording
-2. WHEN the microphone button is activated, THE System SHALL record audio in the patient's selected native language
-3. WHERE a patient speaks Tamil, Hindi, or other supported languages, THE System SHALL accept and process the audio recording
-4. WHEN audio recording completes, THE System SHALL store the audio file with the patient's intake record
-5. WHEN the receptionist submits the intake, THE System SHALL initiate backend triage analysis within 1 second
+1. WHEN a nurse enters a Hospital_ID or scans a QR_Code, THE System SHALL retrieve the profile within 1 second.
+2. WHEN the profile is loaded, THE System SHALL display demograpics, last 3-5 visits, and an "Initiate Intake" button.
+3. WHEN "Initiate Intake" is clicked, THE System SHALL display fields for Vitals (BP, HR, SpO2, Temp) AND a microphone button for complaint recording.
+4. THE System SHALL allow recording complaints in Tamil, Hindi, or other supported languages.
+5. WHEN the intake is submitted (Vitals + Audio), THE System SHALL execute the AI Triage pipeline using BOTH sources of data.
 
 ### Requirement 4: Automated Triage Analysis
 
@@ -88,17 +74,7 @@ VaidyaSaarathi is a clinical workflow solution that transforms patient intake an
 3. WHEN the TTS button is activated, THE System SHALL play the instructions in the patient's native language with clear audio quality
 4. WHEN displaying instructions, THE System SHALL show both text and audio options simultaneously
 
-### Requirement 6: Clinical Vitals Entry
-
-**User Story:** As a nurse, I want to enter patient vitals and clinical measurements, so that doctors have complete objective data for decision-making.
-
-#### Acceptance Criteria
-
-1. WHEN a nurse accesses a patient record, THE System SHALL display input fields for vital signs including temperature, blood pressure, heart rate, respiratory rate, and oxygen saturation
-2. WHEN a nurse enters vital values, THE System SHALL validate that values are within physiologically plausible ranges
-3. IF a vital value is outside normal ranges, THEN THE System SHALL display a warning indicator without blocking submission
-4. WHEN a nurse submits vitals, THE System SHALL associate the measurements with the patient's current triage record and timestamp the entry
-5. WHEN vitals are submitted, THE System SHALL update the Risk_Score if clinical thresholds are exceeded
+### Requirement 6: (Consolidated into Requirement 2)
 
 ### Requirement 7: Specialist Dashboard and Queue Management
 

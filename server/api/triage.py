@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
 from typing import Optional, List
+import datetime
 from services.triage_service import TriageService, TriageRecord, VitalSigns, SOAPNote
 from services.ai_service import AudioProcessor, AIServiceError
 import os
@@ -39,7 +40,12 @@ async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, languag
         transcript, anomalies = await asyncio.gather(transcript_task, anomaly_task)
         
         # 2. Reasoning step
-        analysis = await run_in_threadpool(ai_processor.generate_soap_note, transcript, anomalies)
+        vitals_dict = None
+        record = await triage_service.get_triage(triage_id)
+        if record and record.vitals:
+            vitals_dict = record.vitals.dict()
+            
+        analysis = await run_in_threadpool(ai_processor.generate_soap_note, transcript, anomalies, vitals_dict)
         
         # 3. Save results
         record = await triage_service.get_triage(triage_id)
@@ -65,17 +71,37 @@ async def create_triage(
     background_tasks: BackgroundTasks,
     patient_id: str = Form(...),
     language: str = Form("English"),
-    audio: UploadFile = File(...)
+    audio: UploadFile = File(...),
+    temp: Optional[float] = Form(None),
+    bp_sys: Optional[int] = Form(None),
+    bp_dia: Optional[int] = Form(None),
+    hr: Optional[int] = Form(None),
+    rr: Optional[int] = Form(None),
+    spo2: Optional[int] = Form(None)
 ):
-    """Upload audio for a patient and start triage pipeline"""
+    """Upload audio for a patient and start triage pipeline with optional vitals"""
     audio_bytes = await audio.read()
     
+    # Create VitalSigns object if any data provided
+    vitals = None
+    if any([temp, bp_sys, bp_dia, hr, rr, spo2]):
+        vitals = VitalSigns(
+            temperature=temp or 0.0,
+            blood_pressure_systolic=bp_sys or 0,
+            blood_pressure_diastolic=bp_dia or 0,
+            heart_rate=hr or 0,
+            respiratory_rate=rr or 0,
+            oxygen_saturation=spo2 or 0,
+            recorded_at=datetime.datetime.utcnow(),
+            recorded_by="Nurse_Intake_01" # Mock
+        )
+
     # Save file locally (Encrypted in prod)
     file_path = f"{AUDIO_DIR}/{audio.filename}"
     with open(file_path, "wb") as f:
         f.write(audio_bytes)
     
-    record = await triage_service.create_triage_record(patient_id, file_path, language)
+    record = await triage_service.create_triage_record(patient_id, file_path, language, vitals)
     
     # Process asynchronously
     background_tasks.add_task(_process_triage_audio_task, record.id, audio_bytes, language)

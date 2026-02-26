@@ -47,14 +47,21 @@ class TriageService:
     def __init__(self):
         pass
 
-    async def create_triage_record(self, patient_id: str, audio_file_path: str, language: str) -> TriageRecord:
-        """Create new triage record with audio"""
+    async def create_triage_record(
+        self, 
+        patient_id: str, 
+        audio_file_path: str, 
+        language: str,
+        vitals: Optional[VitalSigns] = None
+    ) -> TriageRecord:
+        """Create new triage record with audio and optional vitals"""
         triage_id = str(uuid.uuid4())
         record = TriageRecord(
             id=triage_id,
             patient_id=patient_id,
             audio_file_url=audio_file_path,
             language=language,
+            vitals=vitals,
             status="pending",
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()

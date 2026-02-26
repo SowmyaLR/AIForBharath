@@ -1,24 +1,34 @@
 "use client"
-import { useState, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '@/components/AuthProvider';
 import { useRouter } from 'next/navigation';
-import { HeartPulse, Activity, UserPlus, FileHeart, LogOut, Search } from 'lucide-react';
+import { Mic, Square, Save, Activity, UploadCloud, Users, LogOut, Thermometer, Droplets, HeartPulse, Wind } from 'lucide-react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 
-export default function NursePage() {
+export default function NurseIntakePage() {
     const { user, token, logout, isLoading } = useAuth();
     const router = useRouter();
-    const [queue, setQueue] = useState<any[]>([]);
-    const [selectedPatient, setSelectedPatient] = useState<any | null>(null);
+
+    const [patientId, setPatientId] = useState('P-001');
+    const [language, setLanguage] = useState('English');
     const [vitals, setVitals] = useState({
-        temperature: 37.0,
-        blood_pressure_systolic: 120,
-        blood_pressure_diastolic: 80,
-        heart_rate: 75,
-        respiratory_rate: 16,
-        oxygen_saturation: 98
+        temp: 37.0,
+        bp_sys: 120,
+        bp_dia: 80,
+        hr: 75,
+        rr: 16,
+        spo2: 98
     });
+
+    const [isRecording, setIsRecording] = useState(false);
+    const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+    const [uploadStatus, setUploadStatus] = useState<string>('');
+    const [recordingTime, setRecordingTime] = useState(0);
+
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const chunksRef = useRef<Blob[]>([]);
+    const timerRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
         if (!isLoading && (!user || user.role !== 'nurse')) {
@@ -30,23 +40,6 @@ export default function NursePage() {
         return null;
     }
 
-    useEffect(() => {
-        fetchQueue();
-        // Poll every 10 seconds for demo (WebSocket in prod)
-        const interval = setInterval(fetchQueue, 10000);
-        return () => clearInterval(interval);
-    }, []);
-
-    const fetchQueue = async () => {
-        try {
-            const res = await axios.get('http://localhost:8000/triage/queue');
-            // Filter for patients who need vitals or are in progress
-            setQueue(res.data.filter((item: any) => item.status !== 'finalized'));
-        } catch (e) {
-            console.error(e);
-        }
-    };
-
     const handleVitalsChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setVitals({
             ...vitals,
@@ -54,32 +47,98 @@ export default function NursePage() {
         });
     };
 
-    const getRiskColor = (tier: string) => {
-        if (tier === 'EMERGENCY') return 'text-red-700 bg-red-100 border-red-200 shadow-sm shadow-red-200';
-        if (tier === 'URGENT') return 'text-orange-700 bg-orange-100 border-orange-200';
-        if (tier === 'SEMI_URGENT') return 'text-amber-700 bg-amber-100 border-amber-200';
-        return 'text-green-700 bg-green-100 border-green-200';
+    const startRecording = async () => {
+        try {
+            if (!navigator?.mediaDevices?.getUserMedia) {
+                alert("Microphone API is not available. Please ensure you are accessing the app via 'localhost' or HTTPS.");
+                return;
+            }
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+
+            mediaRecorderRef.current.ondataavailable = (e) => {
+                if (e.data.size > 0) chunksRef.current.push(e.data);
+            };
+
+            mediaRecorderRef.current.onstop = () => {
+                const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+                setAudioBlob(blob);
+                chunksRef.current = [];
+            };
+
+            mediaRecorderRef.current.start();
+            setIsRecording(true);
+            setRecordingTime(0);
+            timerRef.current = setInterval(() => setRecordingTime(prev => prev + 1), 1000);
+
+        } catch (err) {
+            console.error("Microphone error:", err);
+            alert("Could not access microphone.");
+        }
     };
 
-    const submitVitals = async () => {
-        if (!selectedPatient) return;
-        try {
-            await axios.post(`http://localhost:8000/triage/${selectedPatient.id}/vitals`, {
-                ...vitals,
-                recorded_at: new Date().toISOString(),
-                recorded_by: user.id
-            });
-            alert('Vitals saved successfully!');
-            setSelectedPatient(null);
-            fetchQueue();
-        } catch (e) {
-            console.error("Failed to save vitals:", e);
-            alert("Error saving vitals.");
+    const stopRecording = () => {
+        if (mediaRecorderRef.current && isRecording) {
+            mediaRecorderRef.current.stop();
+            mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
+            setIsRecording(false);
+            if (timerRef.current) clearInterval(timerRef.current);
         }
+    };
+
+    const submitTriage = async () => {
+        if (!audioBlob || uploadStatus === 'uploading' || uploadStatus === 'success') return;
+        setUploadStatus('uploading');
+
+        const formData = new FormData();
+        formData.append('patient_id', patientId);
+        formData.append('language', language);
+        formData.append('audio', audioBlob, `triage_${Date.now()}.webm`);
+
+        // Add Vitals
+        formData.append('temp', vitals.temp.toString());
+        formData.append('bp_sys', vitals.bp_sys.toString());
+        formData.append('bp_dia', vitals.bp_dia.toString());
+        formData.append('hr', vitals.hr.toString());
+        formData.append('rr', vitals.rr.toString());
+        formData.append('spo2', vitals.spo2.toString());
+
+        try {
+            await axios.post('http://localhost:8000/triage/', formData, {
+                headers: {
+                    'Content-Type': 'multipart/form-data',
+                }
+            });
+            setUploadStatus('success');
+            setTimeout(() => {
+                setAudioBlob(null);
+                setUploadStatus('');
+                setRecordingTime(0);
+                // Reset vitals for next patient
+                setVitals({
+                    temp: 37.0,
+                    bp_sys: 120,
+                    bp_dia: 80,
+                    hr: 75,
+                    rr: 16,
+                    spo2: 98
+                });
+            }, 3000);
+        } catch (err) {
+            console.error(err);
+            setUploadStatus('error');
+        }
+    };
+
+    const formatTime = (seconds: number) => {
+        const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+        const s = (seconds % 60).toString().padStart(2, '0');
+        return `${m}:${s}`;
     };
 
     return (
         <div className="min-h-screen bg-slate-50">
+            {/* Navigation Bar */}
             <nav className="bg-white shadow-sm border-b border-slate-200 sticky top-0 z-50">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                     <div className="flex justify-between h-16">
@@ -97,109 +156,153 @@ export default function NursePage() {
                 </div>
             </nav>
 
-            <main className="max-w-7xl mx-auto py-10 px-4 sm:px-6 lg:px-8">
-                <div className="flex justify-between items-end mb-8">
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-                        <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight flex items-center gap-3">
-                            <HeartPulse className="text-teal-600 h-8 w-8" />
-                            Nursing Station
-                        </h1>
-                        <p className="mt-2 text-slate-500">Select a patient to record or update vital signs.</p>
-                    </motion.div>
-                </div>
+            <main className="max-w-6xl mx-auto py-10 px-4 sm:px-6 lg:px-8">
+                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-8">
+                    <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight flex items-center gap-3">
+                        <Thermometer className="text-teal-600" />
+                        Clinical Intake Dashboard
+                    </h1>
+                    <p className="mt-2 text-slate-500">Unified capture for patient vitals and symptoms audio.</p>
+                </motion.div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                    {/* Left Col: Queue */}
-                    <div className="lg:col-span-1 bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden h-[calc(100vh-250px)] flex flex-col">
-                        <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-                            <h3 className="font-semibold text-slate-700">Patient Queue</h3>
-                            <span className="bg-teal-100 text-teal-800 text-xs font-bold px-2 py-1 rounded-full">{queue.length} Active</span>
-                        </div>
-                        <div className="overflow-y-auto flex-1 p-2 space-y-2">
-                            {queue.length === 0 ? (
-                                <div className="text-center p-8 text-slate-400 text-sm">No patients waiting.</div>
-                            ) : queue.map((patient: any) => (
-                                <div
-                                    key={patient.id}
-                                    onClick={() => setSelectedPatient(patient)}
-                                    className={`p-4 rounded-xl cursor-pointer transition-all border ${selectedPatient?.id === patient.id ? 'bg-teal-50 border-teal-200 shadow-sm' : 'bg-white border-transparent hover:bg-slate-50'}`}
-                                >
-                                    <div className="flex justify-between items-start">
-                                        <div>
-                                            <h4 className="font-semibold text-slate-900">{patient.patient_id}</h4>
-                                            <p className="text-xs text-slate-500 flex items-center gap-1 mt-1">
-                                                <Activity size={12} /> AI Tier: <span className={`font-bold ${getRiskColor(patient.triage_tier).split(' ')[0]}`}>{patient.triage_tier || 'ROUTINE'}</span>
-                                            </p>
-                                        </div>
-                                        {patient.vitals && <span className="text-[10px] font-bold text-green-600 bg-green-100 px-2 py-0.5 rounded uppercase">Vitals Logged</span>}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
+                <div className="bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden">
+                    <div className="grid grid-cols-1 lg:grid-cols-2">
+                        {/* Left Panel: Patient & Vitals */}
+                        <div className="p-8 border-b lg:border-b-0 lg:border-r border-slate-100 bg-slate-50/50">
+                            <h3 className="text-lg font-semibold text-slate-800 mb-6 flex items-center gap-2">
+                                <Users size={20} className="text-teal-600" />
+                                Patient & Clinical Vitals
+                            </h3>
 
-                    {/* Right Col: Vitals Form */}
-                    <div className="lg:col-span-2">
-                        {selectedPatient ? (
-                            <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-2xl shadow-xl border border-slate-100 p-8">
-                                <div className="flex items-center gap-3 mb-8 pb-4 border-b border-slate-100">
-                                    <div className="h-12 w-12 rounded-full bg-teal-100 flex items-center justify-center text-teal-700">
-                                        <UserPlus size={24} />
+                            <div className="space-y-6">
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Patient ID / QR</label>
+                                        <input
+                                            type="text"
+                                            value={patientId}
+                                            onChange={(e) => setPatientId(e.target.value)}
+                                            className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                                            placeholder="P-001"
+                                        />
                                     </div>
                                     <div>
-                                        <h2 className="text-xl font-bold text-slate-900">Patient: {selectedPatient.patient_id}</h2>
-                                        <p className="text-sm text-slate-500">Record clinical measurements</p>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Language</label>
+                                        <select
+                                            value={language}
+                                            onChange={(e) => setLanguage(e.target.value)}
+                                            className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                                        >
+                                            <option value="English">English</option>
+                                            <option value="Tamil">Tamil / தமிழ்</option>
+                                            <option value="Hindi">Hindi / हिंदी</option>
+                                            <option value="Telugu">Telugu / తెలుగు</option>
+                                        </select>
                                     </div>
                                 </div>
 
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div className="space-y-4 border-r border-slate-50 pr-6">
-                                        <div>
-                                            <label className="block text-sm font-medium text-slate-700 mb-1">Temperature (°C)</label>
-                                            <input type="number" step="0.1" name="temperature" value={vitals.temperature} onChange={handleVitalsChange} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" />
+                                <div className="pt-4 border-t border-slate-200">
+                                    <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">Vitals Entry</h4>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="relative">
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">Temp (°C)</label>
+                                            <input type="number" step="0.1" name="temp" value={vitals.temp} onChange={handleVitalsChange} className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" />
+                                            <Thermometer className="absolute right-3 top-7 text-slate-300" size={16} />
                                         </div>
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="block text-sm font-medium text-slate-700 mb-1">BP Systolic</label>
-                                                <input type="number" name="blood_pressure_systolic" value={vitals.blood_pressure_systolic} onChange={handleVitalsChange} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" />
+                                        <div className="relative">
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">O2 Sat (%)</label>
+                                            <input type="number" name="spo2" value={vitals.spo2} onChange={handleVitalsChange} className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" />
+                                            <Droplets className="absolute right-3 top-7 text-slate-300" size={16} />
+                                        </div>
+                                        <div className="relative">
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">BP Sys/Dia</label>
+                                            <div className="flex gap-1">
+                                                <input type="number" name="bp_sys" value={vitals.bp_sys} onChange={handleVitalsChange} className="w-1/2 px-2 py-2 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-center" />
+                                                <span className="flex items-center text-slate-400">/</span>
+                                                <input type="number" name="bp_dia" value={vitals.bp_dia} onChange={handleVitalsChange} className="w-1/2 px-2 py-2 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-center" />
                                             </div>
-                                            <div>
-                                                <label className="block text-sm font-medium text-slate-700 mb-1">BP Diastolic</label>
-                                                <input type="number" name="blood_pressure_diastolic" value={vitals.blood_pressure_diastolic} onChange={handleVitalsChange} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" />
-                                            </div>
                                         </div>
-                                    </div>
-                                    <div className="space-y-4 pl-0 md:pl-6">
-                                        <div>
-                                            <label className="block text-sm font-medium text-slate-700 mb-1">Heart Rate (bpm)</label>
-                                            <input type="number" name="heart_rate" value={vitals.heart_rate} onChange={handleVitalsChange} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-slate-700 mb-1">Resp. Rate (bpm)</label>
-                                            <input type="number" name="respiratory_rate" value={vitals.respiratory_rate} onChange={handleVitalsChange} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-slate-700 mb-1">O2 Saturation (%)</label>
-                                            <input type="number" name="oxygen_saturation" value={vitals.oxygen_saturation} onChange={handleVitalsChange} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" />
+                                        <div className="relative">
+                                            <label className="block text-xs font-semibold text-slate-500 mb-1">Heart Rate</label>
+                                            <input type="number" name="hr" value={vitals.hr} onChange={handleVitalsChange} className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" />
+                                            <HeartPulse className="absolute right-3 top-7 text-slate-300" size={16} />
                                         </div>
                                     </div>
                                 </div>
-
-                                <div className="mt-10 flex justify-end gap-3 border-t border-slate-100 pt-6">
-                                    <button onClick={() => setSelectedPatient(null)} className="px-6 py-2.5 rounded-xl text-slate-600 font-medium hover:bg-slate-100 transition-colors">Cancel</button>
-                                    <button onClick={submitVitals} className="px-6 py-2.5 rounded-xl bg-teal-600 text-white font-medium hover:bg-teal-700 shadow-lg shadow-teal-200 transition-all flex items-center gap-2">
-                                        <FileHeart size={18} /> Save Vitals
-                                    </button>
-                                </div>
-                            </motion.div>
-                        ) : (
-                            <div className="h-full min-h-[400px] flex flex-col items-center justify-center text-slate-400 bg-white/50 rounded-2xl border border-slate-100 border-dashed">
-                                <Search size={48} className="mb-4 text-slate-200" />
-                                <p>Select a patient from the queue to start.</p>
                             </div>
-                        )}
+                        </div>
+
+                        {/* Right Panel: Audio Intake */}
+                        <div className="p-8 flex flex-col justify-center items-center bg-white">
+                            <h3 className="text-lg font-semibold text-slate-800 self-start mb-10 flex items-center gap-2">
+                                <Mic size={20} className="text-teal-600" />
+                                Symptom Audio Capture
+                            </h3>
+
+                            <div className="text-center mb-8 relative">
+                                {isRecording && (
+                                    <div className="absolute -top-10 left-1/2 -translate-x-1/2 h-8 w-32 flex items-end justify-center gap-1">
+                                        {[...Array(8)].map((_, i) => (
+                                            <motion.div
+                                                key={i}
+                                                animate={{ height: [4, 16, 4] }}
+                                                transition={{ repeat: Infinity, duration: 0.5, delay: i * 0.1 }}
+                                                className="w-1 bg-teal-400 rounded-full"
+                                            />
+                                        ))}
+                                    </div>
+                                )}
+                                <div className={`text-5xl font-mono mb-2 ${isRecording ? 'text-red-500' : 'text-slate-300'}`}>
+                                    {formatTime(recordingTime)}
+                                </div>
+                                <p className="text-sm font-medium text-slate-400 italic">
+                                    {isRecording ? "Listening for symptoms..." : "Ready to capture audio"}
+                                </p>
+                            </div>
+
+                            <div className="flex gap-4 mb-10">
+                                {!isRecording ? (
+                                    <button
+                                        onClick={startRecording}
+                                        className="h-24 w-24 rounded-full bg-slate-100 flex items-center justify-center text-teal-600 hover:bg-teal-50 hover:text-teal-700 border-2 border-slate-200 hover:border-teal-300 transition-all active:scale-95 shadow-xl shadow-slate-100 group"
+                                    >
+                                        <Mic size={40} className="group-hover:scale-110 transition-transform" />
+                                    </button>
+                                ) : (
+                                    <button
+                                        onClick={stopRecording}
+                                        className="h-24 w-24 rounded-full bg-red-50 flex items-center justify-center text-red-600 border-2 border-red-200 animate-pulse active:scale-95 shadow-xl shadow-red-100"
+                                    >
+                                        <Square size={32} className="fill-current" />
+                                    </button>
+                                )}
+                            </div>
+
+                            {audioBlob && !isRecording && (
+                                <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="w-full">
+                                    <button
+                                        onClick={submitTriage}
+                                        disabled={uploadStatus === 'uploading'}
+                                        className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-2 shadow-2xl transition-all
+                                    ${uploadStatus === 'success' ? 'bg-green-500 text-white shadow-green-200' :
+                                                uploadStatus === 'error' ? 'bg-red-500 text-white shadow-red-200' :
+                                                    'bg-teal-600 text-white hover:bg-teal-700 shadow-teal-200'}
+                                `}
+                                    >
+                                        {uploadStatus === 'uploading' && <><Activity className="animate-spin" /> Analyzing Triage Case...</>}
+                                        {uploadStatus === 'success' && <>Triage Case Created Successfully!</>}
+                                        {uploadStatus === 'error' && <>Submission Failed. Retry?</>}
+                                        {uploadStatus === '' && <><UploadCloud /> Submit Triage Case</>}
+                                    </button>
+                                </motion.div>
+                            )}
+                        </div>
                     </div>
                 </div>
+
+                <p className="mt-8 text-center text-slate-400 text-sm">
+                    Privacy Note: Audio and clinical data are processed within the hospital's private AWS instance.
+                </p>
             </main>
         </div>
     );

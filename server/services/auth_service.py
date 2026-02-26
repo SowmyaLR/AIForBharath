@@ -34,18 +34,10 @@ class UserSession(BaseModel):
 # --- Mock Database ---
 # For the hackathon, hardcoding accounts for quick demo:
 MOCK_USERS = {
-    "rec_01": {
-        "id": "u1",
-        "hospital_id": "rec_01",
-        "name": "Sowmya (Reception)",
-        "password": pwd_context.hash("password"),
-        "role": "receptionist",
-        "specialty": None
-    },
     "nur_01": {
-        "id": "u2",
+        "id": "u1",
         "hospital_id": "nur_01",
-        "name": "Nurse Anita",
+        "name": "Nurse Anita (Intake)",
         "password": pwd_context.hash("password"),
         "role": "nurse",
         "specialty": None

@@ -10,6 +10,7 @@ import warnings
 import tensorflow as tf
 from huggingface_hub import snapshot_download
 from sklearn.metrics.pairwise import cosine_similarity
+from typing import Optional, List, Dict
 from transformers import pipeline
 from faster_whisper import WhisperModel
 
@@ -195,9 +196,15 @@ class AudioProcessor:
             traceback.print_exc()
             return {"score": 0.0, "interpretation": "Error analyzing audio.", "findings": []}
 
-    def generate_soap_note(self, transcript: str, risk_data: dict) -> dict:
+    def generate_soap_note(self, transcript: str, risk_data: dict, vitals: Optional[dict] = None) -> dict:
         """Prototype generation logic with strict JSON output"""
         print("\n[AI DEBUG] Generating SOAP Note via Ollama...")
+        
+        # Format vitals for the prompt
+        vitals_str = "Not provided"
+        if vitals:
+            vitals_str = ", ".join([f"{k}: {v}" for k, v in vitals.items() if v])
+
         prompt = f"""
         You are a highly reliable clinical triage AI operating in a structured medical documentation mode.
 
@@ -213,6 +220,9 @@ class AudioProcessor:
         --------------------------------------
         Patient Transcript:
         \"\"\"{transcript}\"\"\"
+
+        Patient Vitals:
+        {vitals_str}
 
         HeAR Acoustic Deviation Score: {risk_data['score']:.1f}/10
 
@@ -271,16 +281,25 @@ class AudioProcessor:
         
         print(f"[AI DEBUG] Ollama Prompt Built ({len(prompt)} chars)")
         
+        t_start = time.time()
         try:
             response = requests.post(
                 f"{OLLAMA_HOST}/api/generate",
                 json={
                     "model": "alibayram/medgemma",
                     "prompt": prompt,
-                    "stream": False
+                    "stream": False,
+                    "options": {
+                        "num_predict": 512,
+                        "temperature": 0.1,
+                        "num_thread": 4 # Optimize based on local hardware
+                    }
                 }
             )
             response.raise_for_status()
+            t_end = time.time()
+            print(f"[AI DEBUG] SOAP Generation Time: {t_end - t_start:.2f}s")
+            
             result = response.json()
             soap_text = result.get("response", "Error generating note.")
             print(f"\n[AI DEBUG] --- RAW OLLAMA RESPONSE START ---\n{soap_text}\n[AI DEBUG] --- RAW OLLAMA RESPONSE END ---\n")

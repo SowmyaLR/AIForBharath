@@ -29,8 +29,7 @@ export default function LoginPage() {
             login(token, user);
 
             // Redirect based on role
-            if (user.role === 'receptionist') router.push('/receptionist');
-            else if (user.role === 'nurse') router.push('/nurse');
+            if (user.role === 'receptionist' || user.role === 'nurse') router.push('/nurse');
             else if (user.role === 'doctor') router.push('/doctor');
             else router.push('/');
 
@@ -87,7 +86,7 @@ export default function LoginPage() {
                                     value={hospitalId}
                                     onChange={(e) => setHospitalId(e.target.value)}
                                     className="appearance-none block w-full px-3 py-2 border border-slate-300 rounded-lg shadow-sm placeholder-slate-400 focus:outline-none focus:ring-teal-500 focus:border-teal-500 sm:text-sm bg-white/50"
-                                    placeholder="Enter ID (e.g. rec_01)"
+                                    placeholder="Enter ID (e.g. nur_01)"
                                 />
                             </div>
                         </div>
@@ -132,12 +131,9 @@ export default function LoginPage() {
                             </div>
                         </div>
 
-                        <div className="mt-6 grid grid-cols-3 gap-3">
-                            <button onClick={() => autofill('rec_01')} className="w-full inline-flex justify-center py-2 px-3 border border-slate-300 rounded-md shadow-sm bg-white text-xs font-medium text-slate-500 hover:bg-slate-50">
-                                Reception
-                            </button>
+                        <div className="mt-6 grid grid-cols-2 gap-3">
                             <button onClick={() => autofill('nur_01')} className="w-full inline-flex justify-center py-2 px-3 border border-slate-300 rounded-md shadow-sm bg-white text-xs font-medium text-slate-500 hover:bg-slate-50">
-                                Nurse
+                                Nurse Intake
                             </button>
                             <button onClick={() => autofill('doc_cardio')} className="w-full inline-flex justify-center py-2 px-3 border border-slate-300 rounded-md shadow-sm bg-white text-xs font-medium text-slate-500 hover:bg-slate-50">
                                 Doctor
