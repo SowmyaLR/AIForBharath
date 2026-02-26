@@ -54,6 +54,13 @@ export default function NursePage() {
         });
     };
 
+    const getRiskColor = (tier: string) => {
+        if (tier === 'EMERGENCY') return 'text-red-700 bg-red-100 border-red-200 shadow-sm shadow-red-200';
+        if (tier === 'URGENT') return 'text-orange-700 bg-orange-100 border-orange-200';
+        if (tier === 'SEMI_URGENT') return 'text-amber-700 bg-amber-100 border-amber-200';
+        return 'text-green-700 bg-green-100 border-green-200';
+    };
+
     const submitVitals = async () => {
         if (!selectedPatient) return;
         try {
@@ -121,7 +128,7 @@ export default function NursePage() {
                                         <div>
                                             <h4 className="font-semibold text-slate-900">{patient.patient_id}</h4>
                                             <p className="text-xs text-slate-500 flex items-center gap-1 mt-1">
-                                                <Activity size={12} /> AI Status: {patient.status}
+                                                <Activity size={12} /> AI Tier: <span className={`font-bold ${getRiskColor(patient.triage_tier).split(' ')[0]}`}>{patient.triage_tier || 'ROUTINE'}</span>
                                             </p>
                                         </div>
                                         {patient.vitals && <span className="text-[10px] font-bold text-green-600 bg-green-100 px-2 py-0.5 rounded uppercase">Vitals Logged</span>}

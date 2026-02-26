@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import librosa
 import numpy as np
 import tempfile
@@ -7,9 +8,10 @@ import time
 import requests
 import warnings
 import tensorflow as tf
-from huggingface_hub import from_pretrained_keras
+from huggingface_hub import snapshot_download
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
+from faster_whisper import WhisperModel
 
 # Suppress warnings as per prototype
 warnings.filterwarnings("ignore", category=UserWarning, module="librosa")
@@ -21,6 +23,21 @@ import json
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 # Clinical Triage Constants
+TRIAGE_BUCKETS = {
+    "EMERGENCY": 4,   # 🔴 Immediate risk
+    "URGENT": 3,      # 🟠 High risk
+    "SEMI_URGENT": 2, # 🟡 Needs evaluation
+    "ROUTINE": 1      # 🟢 Low risk
+}
+
+# Score mapping for UI legacy compatibility (0-100)
+BUCKET_SCORES = {
+    "EMERGENCY": 95,
+    "URGENT": 75,
+    "SEMI_URGENT": 45,
+    "ROUTINE": 15
+}
+
 CRITICAL_SYMPTOMS = ["chest pain", "severe breathlessness", "unconscious", "seizure", "slurred speech", "difficulty speaking", "cannot speak", "sudden weakness", "stroke", "paralysis", "vision loss"]
 HIGH_SYMPTOMS = ["breathlessness", "persistent vomiting", "high fever", "severe headache", "confusion", "visual disturbances", "blurred vision"]
 MODERATE_SYMPTOMS = ["dizziness", "body pain", "cough", "fatigue", "lightheadedness", "nausea"]
@@ -35,18 +52,18 @@ class AIServiceError(Exception):
     pass
 class AudioProcessor:
     def __init__(self):
-        # 1. Initialize Whisper
-        print("Loading ASR model (Whisper)...")
-        self.asr_pipeline = pipeline(
-            "automatic-speech-recognition", 
-            model="openai/whisper-small", 
-            device="cpu"
-        )
+        # 1. Initialize Whisper Model (faster-whisper)
+        print("Loading ASR model (faster-whisper small)...")
+        # Use CPU with int8 quantization for high performance on both CPU and Apple Silicon
+        # 'auto' will choose the best device available.
+        self.asr_model = WhisperModel("small", device="auto", compute_type="int8")
         
         # 2. Initialize HeAR (Official Keras)
-        print("Loading HeAR model (Keras)...")
+        print("Loading HeAR model (HuggingFace)...")
         try:
-            model = from_pretrained_keras("google/hear")
+            # Download full repo and load as SavedModel
+            model_dir = snapshot_download("google/hear")
+            model = tf.saved_model.load(model_dir)
             self.hear_serving_signature = model.signatures['serving_default']
             print("HeAR model loaded successfully!")
         except Exception as e:
@@ -68,15 +85,45 @@ class AudioProcessor:
                 os.remove(tmp_path)
 
     def transcribe(self, audio_bytes: bytes, language: str) -> str:
-        """Performs ASR as per prototype"""
+        """Performs ASR with optimized faster-whisper inference"""
         try:
             print(f"\n[AI DEBUG] Starting Transcribe ({len(audio_bytes)} bytes)...")
             data, samplerate = self.load_audio_robust(audio_bytes)
             
-            print(f"[AI DEBUG] Running Whisper Inference (Language: {language})...")
-            result = self.asr_pipeline(data, generate_kwargs={"task": "translate"})
-            text = result.get("text", "")
-            print(f"[AI DEBUG] Transcribe/Translate Result: {text[:100]}...")
+            # Use lowercase for language
+            lang_code = language.lower()
+            
+            # WhisperModel expects 'en', 'ta', etc. but we can also use 'english', 'tamil'
+            # Mapping common languages to codes for faster-whisper robustness
+            lang_map = {
+                "english": "en",
+                "tamil": "ta",
+                "hindi": "hi",
+                "telugu": "te"
+            }
+            whisper_lang = lang_map.get(lang_code, lang_code)
+            
+            # Task selection
+            task = "transcribe" if lang_code == "english" else "translate"
+            
+            print(f"[AI DEBUG] Running faster-whisper Inference (Task: {task}, Language: {whisper_lang})...")
+            
+            # faster-whisper transcribe returns a generator of segments
+            segments, info = self.asr_model.transcribe(
+                data,
+                task=task,
+                language=whisper_lang,
+                beam_size=5,
+                repetition_penalty=1.1,
+                no_repeat_ngram_size=3,
+                condition_on_previous_text=False # prevents hallucinations
+            )
+            
+            # Collect text from segments
+            text_parts = [segment.text for segment in segments]
+            text = " ".join(text_parts).strip()
+            
+            print(f"[AI DEBUG] Transcribe Result: {text[:200]}...")
             return text
         except Exception as e:
             print(f"[AI DEBUG] ASR Error: {e}")
@@ -177,9 +224,10 @@ class AudioProcessor:
         [METADATA]
         {{
           "symptoms": [
-            {{"name": "symptom name", "severity": "mild|moderate|severe", "category": "cardiac|respiratory|neurological|general"}}
+            {{"name": "...", "severity": "...", "category": "..."}}
           ],
-          "duration": "patient mentioned duration",
+          "triage_tier": "EMERGENCY|URGENT|SEMI_URGENT|ROUTINE",
+          "clinical_reasoning": "Brief explanation for the tier",
           "red_flags_present": true|false
         }}
         
@@ -203,77 +251,130 @@ class AudioProcessor:
             print(f"\n[AI DEBUG] --- RAW OLLAMA RESPONSE START ---\n{soap_text}\n[AI DEBUG] --- RAW OLLAMA RESPONSE END ---\n")
             print(f"[AI DEBUG] Ollama Raw Response Received ({len(soap_text)} chars)")
             
-            # Extract metadata and calculate composite risk
-            meta_json = self._extract_section(soap_text, "METADATA")
-            symptoms = []
-            if "Bioacoustic" not in meta_json: # basic check if it's actual content
+            # 1. Clean response (remove markdown fences)
+            clean_response = soap_text.strip()
+            if clean_response.startswith("```"):
+                lines = clean_response.split("\n")
+                if lines[0].startswith("```"): lines = lines[1:]
+                if lines and lines[-1].startswith("```"): lines = lines[:-1]
+                clean_response = "\n".join(lines).strip()
+
+            # 2. Distinguish between Tag-based and Full-JSON
+            # If we see common tags, assume it's tag-based even if there's JSON inside
+            is_tag_based = any(tag in soap_text for tag in ["[SUBJECTIVE]", "[OBJECTIVE]", "[ASSESSMENT]", "[PLAN]"])
+            
+            full_json = None
+            if not is_tag_based:
                 try:
-                    meta_data = json.loads(meta_json)
-                    symptoms = meta_data.get("symptoms", [])
+                    # Handle cases where the whole response is a JSON object
+                    json_match = re.search(r'(\{.*\})', clean_response, re.DOTALL)
+                    if json_match:
+                        maybe_json = json.loads(json_match.group(1))
+                        # Verify it's a SOAP JSON and not just a metadata block
+                        if any(k.upper() in maybe_json for k in ["SUBJECTIVE", "ASSESSMENT"]):
+                            full_json = maybe_json
+                            print("[AI DEBUG] Successfully parsed Full SOAP JSON from response")
+                except:
+                    pass
+
+            # 3. Extract sections
+            meta_data = {}
+            if full_json:
+                # Handle different casing from different models
+                def get_case_insensitive(d, key, default=""):
+                    for k, v in d.items():
+                        if k.upper() == key.upper(): return v
+                    return default
+
+                subjective = get_case_insensitive(full_json, "SUBJECTIVE")
+                objective = get_case_insensitive(full_json, "OBJECTIVE")
+                assessment = get_case_insensitive(full_json, "ASSESSMENT")
+                plan = get_case_insensitive(full_json, "PLAN")
+                meta_data = get_case_insensitive(full_json, "METADATA", full_json)
+            else:
+                subjective = self._extract_section(soap_text, "SUBJECTIVE")
+                objective = self._extract_section(soap_text, "OBJECTIVE")
+                assessment = self._extract_section(soap_text, "ASSESSMENT")
+                plan = self._extract_section(soap_text, "PLAN")
+                meta_json = self._extract_section(soap_text, "METADATA")
+                try:
+                    # Clean embedded JSON if needed
+                    clean_meta = meta_json.strip()
+                    if "```" in clean_meta:
+                        clean_meta = re.sub(r"```[a-z]*\n?", "", clean_meta).replace("```", "").strip()
+                    # Ensure we have a valid JSON object
+                    json_match = re.search(r'(\{.*\})', clean_meta, re.DOTALL)
+                    if json_match:
+                        meta_data = json.loads(json_match.group(1))
+                    else:
+                        meta_data = json.loads(clean_meta)
                 except:
                     print(f"[AI DEBUG] Metadata JSON parsing failed.")
 
-            composite_risk, assigned_specialty = self._calculate_composite_score(symptoms, risk_data['score'])
+            # New Bucket-Based Triage Flow
+            final_tier, assigned_specialty = self._calculate_bucket_triage(
+                transcript=transcript,
+                ai_meta=meta_data,
+                acoustic_score=risk_data['score']
+            )
 
             final_analysis = {
                 "soap": {
-                    "subjective": self._extract_section(soap_text, "SUBJECTIVE"),
-                    "objective": self._extract_section(soap_text, "OBJECTIVE"),
-                    "assessment": self._extract_section(soap_text, "ASSESSMENT"),
-                    "plan": self._extract_section(soap_text, "PLAN")
+                    "subjective": subjective,
+                    "objective": objective,
+                    "assessment": assessment,
+                    "plan": plan
                 },
                 "specialty": assigned_specialty, 
-                "risk_score": composite_risk
+                "risk_score": BUCKET_SCORES.get(final_tier, 0),
+                "triage_tier": final_tier
             }
-            print(f"[AI DEBUG] Final Parsed Analysis: {final_analysis}")
+            print(f"[AI DEBUG] Final Parsed Analysis: {assigned_specialty}, Tier: {final_tier}")
             return final_analysis
         except Exception as e:
             print(f"[AI DEBUG] Ollama Error: {e}")
             return {"soap": {"subjective": "Error generating note."}, "specialty": "General Medicine", "risk_score": 0}
 
-    def _calculate_composite_score(self, symptoms: list, acoustic_score: float) -> tuple:
-        """Calculates 60/40 weighted risk and assigns specialty"""
-        # 1. Calculate Symptom Risk (Max points based on tiers)
-        max_symptom_val = 0
-        primary_category = "general"
-        
-        for s in symptoms:
-            name = s.get("name", "").lower()
-            cat = s.get("category", "general").lower()
+    def _calculate_bucket_triage(self, transcript: str, ai_meta: dict, acoustic_score: float) -> tuple:
+        """Implements the 4-tier bucket flow: AI -> Guardrail -> Acoustic Escalation"""
+        # 1. Start with AI Classification
+        ai_tier = ai_meta.get("triage_tier", "ROUTINE").upper()
+        if ai_tier not in TRIAGE_BUCKETS:
+            ai_tier = "ROUTINE"
             
-            val = 10 # Default mild
-            matched_tier = "Mild"
-            
-            # Use partial matching for robustness
-            if any(cs in name or name in cs for cs in CRITICAL_SYMPTOMS): 
-                val = 90
-                matched_tier = "CRITICAL"
-            elif any(hs in name or name in hs for hs in HIGH_SYMPTOMS): 
-                val = 65
-                matched_tier = "HIGH"
-            elif any(ms in name or name in ms for ms in MODERATE_SYMPTOMS): 
-                val = 35
-                matched_tier = "MODERATE"
-            
-            print(f"[RISK MATH] Symptom: '{name}' -> Tier: {matched_tier} ({val} pts)")
-            
-            if val > max_symptom_val:
-                max_symptom_val = val
-                primary_category = cat
+        current_rank = TRIAGE_BUCKETS[ai_tier]
+        print(f"[TRIAGE] Step 1: MedGemma Initial Tier -> {ai_tier}")
 
-        # 2. Weighted Composite Calculation (Total 0-100)
-        # Total Risk = (Symptom Risk * 0.6) + (Acoustic Risk * 0.4)
-        symptom_weight = max_symptom_val * 0.6
-        acoustic_weight = (acoustic_score * 10) * 0.4
-        total_risk = int(symptom_weight + acoustic_weight)
+        # 2. Backend Guardrail Override (Deterministic)
+        transcript_lower = transcript.lower()
+        if any(kw in transcript_lower for kw in CRITICAL_SYMPTOMS):
+            if current_rank < TRIAGE_BUCKETS["EMERGENCY"]:
+                print(f"[TRIAGE] Step 2: Guardrail Triggered! Escalating to EMERGENCY (Critical Keyword detected)")
+                current_rank = TRIAGE_BUCKETS["EMERGENCY"]
+        elif any(kw in transcript_lower for kw in HIGH_SYMPTOMS):
+            if current_rank < TRIAGE_BUCKETS["URGENT"]:
+                print(f"[TRIAGE] Step 2: Guardrail Triggered! Escalating to URGENT (High-risk Keyword detected)")
+                current_rank = TRIAGE_BUCKETS["URGENT"]
+
+        # 3. Optional Acoustic Escalation (max +1 level)
+        # High acoustic deviation (> 7.0) pushes it up one bucket
+        if acoustic_score > 7.0:
+            if current_rank < TRIAGE_BUCKETS["EMERGENCY"]:
+                original_rank = current_rank
+                current_rank += 1
+                new_tier = [k for k, v in TRIAGE_BUCKETS.items() if v == current_rank][0]
+                print(f"[TRIAGE] Step 3: Acoustic Escalation! High deviation ({acoustic_score}) pushes tier +1 to {new_tier}")
+
+        # Final Bucket determination
+        final_tier = [k for k, v in TRIAGE_BUCKETS.items() if v == current_rank][0]
         
-        print(f"[RISK MATH] ------------------------------------")
-        print(f"[RISK MATH] Symptom Component (60%): {symptom_weight:.1f}")
-        print(f"[RISK MATH] Acoustic Component (40%): {acoustic_weight:.1f} (Raw HeAR: {acoustic_score})")
-        print(f"[RISK MATH] Final Composite Score: {total_risk}/100")
-        print(f"[RISK MATH] ------------------------------------")
-        
-        # 3. Specialty Assignment
+        # 4. Specialty Assignment (based on symptoms metadata)
+        symptoms = ai_meta.get("symptoms", [])
+        primary_category = "general"
+        if symptoms:
+            # Simple heuristic: last or most severe category
+            primary_category = symptoms[0].get("category", "general").lower()
+
         specialties = {
             "cardiac": "Cardiology",
             "respiratory": "Pulmonology",
@@ -281,18 +382,20 @@ class AudioProcessor:
             "general": "General Medicine"
         }
         assigned_specialty = specialties.get(primary_category, "General Medicine")
-        
-        return min(100, total_risk), assigned_specialty
+
+        return final_tier, assigned_specialty
 
     def _extract_section(self, text, section):
-        import re
-        # We now use a strict [TAG] format for better reliability
         # Matches [SECTION] or **[SECTION]** or variations
         pattern = fr"\[{section}\]\s*(.*?)(?=\s*\n?\[[A-Z]+\]|$)"
         match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
         
         if match:
-            return match.group(1).strip()
+            content = match.group(1).strip()
+            # Remove any lingering markdown fences if it's a metadata block
+            if section == "METADATA":
+                content = re.sub(r"```[a-z]*\n?", "", content).replace("```", "").strip()
+            return content
             
         # Fallback for older formats or bolding variations
         fallback_pattern = fr"(?i)\**{section}\**[\s:-]*(.*?)(?=\s*\n?\**[A-Z]{{3,}}\**[\s:-]|$)"

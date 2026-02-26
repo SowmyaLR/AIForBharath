@@ -63,9 +63,10 @@ export default function DoctorPage() {
         }
     };
 
-    const getRiskColor = (score: number) => {
-        if (score > 70) return 'text-red-700 bg-red-100 border-red-200';
-        if (score > 40) return 'text-amber-700 bg-amber-100 border-amber-200';
+    const getRiskColor = (tier: string) => {
+        if (tier === 'EMERGENCY') return 'text-red-700 bg-red-100 border-red-200 shadow-sm shadow-red-200';
+        if (tier === 'URGENT') return 'text-orange-700 bg-orange-100 border-orange-200';
+        if (tier === 'SEMI_URGENT') return 'text-amber-700 bg-amber-100 border-amber-200';
         return 'text-green-700 bg-green-100 border-green-200';
     };
 
@@ -109,7 +110,6 @@ export default function DoctorPage() {
                                 </div>
                             ) : (
                                 queue.map((pt) => {
-                                    const riskCls = getRiskColor(pt.risk_score);
                                     return (
                                         <div
                                             key={pt.id}
@@ -121,8 +121,8 @@ export default function DoctorPage() {
                                         >
                                             <div className="flex justify-between items-start mb-2">
                                                 <h3 className="font-bold text-slate-900">Patient: {pt.patient_id}</h3>
-                                                <span className={`text-xs font-bold px-2.5 py-1 rounded-full border ${riskCls}`}>
-                                                    Risk: {pt.risk_score}
+                                                <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border uppercase tracking-wider ${getRiskColor(pt.triage_tier)}`}>
+                                                    {pt.triage_tier || 'Routine'}
                                                 </span>
                                             </div>
                                             <div className="flex items-center justify-between text-xs text-slate-500">
@@ -153,9 +153,9 @@ export default function DoctorPage() {
                                         </p>
                                     </div>
                                     <div className="text-right">
-                                        <div className="text-xs text-slate-400 uppercase tracking-wider font-bold mb-1">MedGemma Assessment</div>
-                                        <div className={`inline-flex items-center justify-center h-10 w-10 rounded-full font-bold text-lg ${getRiskColor(selectedPatient.risk_score)}`}>
-                                            {selectedPatient.risk_score}
+                                        <div className="text-xs text-slate-400 uppercase tracking-wider font-bold mb-1">Triage Category</div>
+                                        <div className={`px-4 py-1.5 rounded-full font-extrabold text-sm border ${getRiskColor(selectedPatient.triage_tier)}`}>
+                                            {selectedPatient.triage_tier || 'ROUTINE'}
                                         </div>
                                     </div>
                                 </div>

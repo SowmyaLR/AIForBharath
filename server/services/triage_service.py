@@ -35,6 +35,7 @@ class TriageRecord(BaseModel):
     soap_note: Optional[SOAPNote] = None
     vitals: Optional[VitalSigns] = None
     risk_score: int = 0
+    triage_tier: str = "ROUTINE" # 'EMERGENCY' | 'URGENT' | 'SEMI_URGENT' | 'ROUTINE'
     specialty: str = "General Medicine"
     status: str  # 'pending' | 'in_progress' | 'ready_for_review' | 'finalized'
     created_at: datetime

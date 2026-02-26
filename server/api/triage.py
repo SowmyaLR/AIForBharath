@@ -48,9 +48,10 @@ async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, languag
             record.soap_note = SOAPNote(**analysis.get("soap", {}))
             record.specialty = analysis.get("specialty", "General Medicine")
             record.risk_score = analysis.get("risk_score", 0)
+            record.triage_tier = analysis.get("triage_tier", "ROUTINE")
             record.status = "ready_for_review"
             await triage_service.update_triage_status(triage_id, "ready_for_review")
-            print(f"[API DEBUG] Triage {triage_id} updated and ready. Specialty: {record.specialty}. Risk: {record.risk_score}")
+            print(f"[API DEBUG] Triage {triage_id} updated and ready. Specialty: {record.specialty}. Bucket: {record.triage_tier}")
             print(f"[API DEBUG] SOAP Subjective: {record.soap_note.subjective[:50]}...")
         else:
             print(f"[API DEBUG] Record {triage_id} not found for update!")
