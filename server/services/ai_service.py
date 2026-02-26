@@ -53,10 +53,10 @@ class AIServiceError(Exception):
 class AudioProcessor:
     def __init__(self):
         # 1. Initialize Whisper Model (faster-whisper)
-        print("Loading ASR model (faster-whisper small)...")
+        print("Loading ASR model (faster-whisper medium)...")
         # Use CPU with int8 quantization for high performance on both CPU and Apple Silicon
         # 'auto' will choose the best device available.
-        self.asr_model = WhisperModel("small", device="auto", compute_type="int8")
+        self.asr_model = WhisperModel("medium", device="auto", compute_type="int8")
         
         # 2. Initialize HeAR (Official Keras)
         print("Loading HeAR model (HuggingFace)...")
@@ -196,42 +196,77 @@ class AudioProcessor:
             return {"score": 0.0, "interpretation": "Error analyzing audio.", "findings": []}
 
     def generate_soap_note(self, transcript: str, risk_data: dict) -> dict:
-        """Prototype generation logic"""
+        """Prototype generation logic with strict JSON output"""
         print("\n[AI DEBUG] Generating SOAP Note via Ollama...")
         prompt = f"""
-        [SYSTEM]
-        You are a highly efficient clinical triage AI.
-        
-        [INPUT DATA]
-        Patient Transcript: "{transcript}"
-        HeAR Acoustic Analysis: Acoustic Deviation Score {risk_data['score']:.1f}/10
-        
-        [INSTRUCTIONS]
-        Generate a professional SOAP note and extract clinical metadata.
-        Clinical weighting: Prioritize the Acoustic Deviation Score (>5.0) ONLY if symptoms are respiratory/cardiac (cough, breathlessness, chest pain). Otherwise, treat it as a secondary baseline.
-        
-        [REQUIRED FORMAT]
-        [SUBJECTIVE]
-        (Detailed symptoms, onset, and patient history)
-        [OBJECTIVE]
-        (Physical and bioacoustic findings. State the "Acoustic Deviation Score" here. 
-        IMPORTANT: Infer clinical signs from the transcript, such as "audible respiratory distress," "clarity of speech," "reported level of pain," or specific visual signs mentioned by the patient.)
-        [ASSESSMENT]
-        (Clinical logic and context-aware differential diagnosis)
-        [PLAN]
-        (Next steps: tests, treatments, and follow-up)
-        
-        [METADATA]
+        You are a highly reliable clinical triage AI operating in a structured medical documentation mode.
+
+        You MUST return ONLY valid JSON.
+        Do NOT include markdown.
+        Do NOT include headings outside JSON.
+        Do NOT include commentary.
+        Do NOT include explanations before or after the JSON.
+        The output MUST be fully parseable using a JSON parser.
+
+        --------------------------------------
+        INPUT DATA
+        --------------------------------------
+        Patient Transcript:
+        \"\"\"{transcript}\"\"\"
+
+        HeAR Acoustic Deviation Score: {risk_data['score']:.1f}/10
+
+        --------------------------------------
+        CLINICAL WEIGHTING LOGIC
+        --------------------------------------
+        1. The Acoustic Deviation Score (>5.0) should be given higher clinical importance 
+           ONLY when symptoms are respiratory or cardiac in nature 
+           (e.g., cough, breathlessness, chest pain, palpitations).
+
+        2. If symptoms are non-respiratory/non-cardiac, treat the Acoustic Score 
+           as a secondary contextual baseline only.
+
+        3. Infer observable clinical signs from transcript language where possible 
+           (e.g., audible respiratory distress, speech clarity, distress level, 
+           weakness, confusion, visible swelling, etc.).
+
+        4. Use structured clinical reasoning consistent with real-world triage standards.
+
+        --------------------------------------
+        OUTPUT FORMAT (STRICT JSON ONLY)
+        --------------------------------------
+
         {{
-          "symptoms": [
-            {{"name": "...", "severity": "...", "category": "..."}}
-          ],
-          "triage_tier": "EMERGENCY|URGENT|SEMI_URGENT|ROUTINE",
-          "clinical_reasoning": "Brief explanation for the tier",
-          "red_flags_present": true|false
+          "soap_note": {{
+            "subjective": "Detailed symptoms, onset, duration, associated symptoms, relevant history.",
+            "objective": "Observed or inferred findings including Acoustic Deviation Score and inferred clinical signs.",
+            "assessment": "Context-aware clinical reasoning with prioritized differential diagnoses.",
+            "plan": "Clear next steps: investigations, monitoring, referrals, treatment suggestions, follow-up."
+          }},
+          "metadata": {{
+            "symptoms": [
+              {{
+                "name": "symptom name",
+                "severity": "MILD|MODERATE|SEVERE",
+                "category": "RESPIRATORY|CARDIAC|NEUROLOGICAL|GASTROINTESTINAL|GENERAL|OTHER"
+              }}
+            ],
+            "triage_tier": "EMERGENCY|URGENT|SEMI_URGENT|ROUTINE",
+            "clinical_reasoning": "Concise explanation for triage tier selection.",
+            "red_flags_present": true|false
+          }}
         }}
-        
-        GENERATE NOW. DO NOT INCLUDE INTRODUCTORY TEXT.
+
+        --------------------------------------
+        VALIDATION REQUIREMENTS
+        --------------------------------------
+        - The response MUST be valid JSON.
+        - No trailing commas.
+        - Boolean values must be true or false (lowercase).
+        - No additional text outside the JSON object.
+        - If formatting is incorrect, internally correct it before responding.
+
+        Generate the structured clinical output now.
         """
         
         print(f"[AI DEBUG] Ollama Prompt Built ({len(prompt)} chars)")
@@ -249,65 +284,43 @@ class AudioProcessor:
             result = response.json()
             soap_text = result.get("response", "Error generating note.")
             print(f"\n[AI DEBUG] --- RAW OLLAMA RESPONSE START ---\n{soap_text}\n[AI DEBUG] --- RAW OLLAMA RESPONSE END ---\n")
-            print(f"[AI DEBUG] Ollama Raw Response Received ({len(soap_text)} chars)")
             
-            # 1. Clean response (remove markdown fences)
+            # 1. Clean response (remove markdown fences and trailing text)
             clean_response = soap_text.strip()
-            if clean_response.startswith("```"):
-                lines = clean_response.split("\n")
-                if lines[0].startswith("```"): lines = lines[1:]
-                if lines and lines[-1].startswith("```"): lines = lines[:-1]
-                clean_response = "\n".join(lines).strip()
-
-            # 2. Distinguish between Tag-based and Full-JSON
-            # If we see common tags, assume it's tag-based even if there's JSON inside
-            is_tag_based = any(tag in soap_text for tag in ["[SUBJECTIVE]", "[OBJECTIVE]", "[ASSESSMENT]", "[PLAN]"])
+            # Find the outermost { } to handle any preamble/postamble
+            start_idx = clean_response.find('{')
+            end_idx = clean_response.rfind('}')
             
             full_json = None
-            if not is_tag_based:
+            if start_idx != -1 and end_idx != -1:
                 try:
-                    # Handle cases where the whole response is a JSON object
-                    json_match = re.search(r'(\{.*\})', clean_response, re.DOTALL)
-                    if json_match:
-                        maybe_json = json.loads(json_match.group(1))
-                        # Verify it's a SOAP JSON and not just a metadata block
-                        if any(k.upper() in maybe_json for k in ["SUBJECTIVE", "ASSESSMENT"]):
-                            full_json = maybe_json
-                            print("[AI DEBUG] Successfully parsed Full SOAP JSON from response")
-                except:
-                    pass
+                    json_str = clean_response[start_idx:end_idx+1]
+                    full_json = json.loads(json_str)
+                    print("[AI DEBUG] Successfully parsed JSON from structure")
+                except Exception as e:
+                    print(f"[AI DEBUG] JSON parse failed: {e}")
 
-            # 3. Extract sections
+            # 2. Extract sections with fallbacks
             meta_data = {}
-            if full_json:
-                # Handle different casing from different models
-                def get_case_insensitive(d, key, default=""):
-                    for k, v in d.items():
-                        if k.upper() == key.upper(): return v
-                    return default
+            subjective, objective, assessment, plan = "", "", "", ""
 
-                subjective = get_case_insensitive(full_json, "SUBJECTIVE")
-                objective = get_case_insensitive(full_json, "OBJECTIVE")
-                assessment = get_case_insensitive(full_json, "ASSESSMENT")
-                plan = get_case_insensitive(full_json, "PLAN")
-                meta_data = get_case_insensitive(full_json, "METADATA", full_json)
+            if full_json:
+                # Support both new and old structures for backward compatibility
+                soap_obj = full_json.get("soap_note", full_json)
+                subjective = soap_obj.get("subjective", full_json.get("SUBJECTIVE", ""))
+                objective = soap_obj.get("objective", full_json.get("OBJECTIVE", ""))
+                assessment = soap_obj.get("assessment", full_json.get("ASSESSMENT", ""))
+                plan = soap_obj.get("plan", full_json.get("PLAN", ""))
+                meta_data = full_json.get("metadata", full_json.get("METADATA", full_json))
             else:
+                # Fallback to tag-based if JSON fails
                 subjective = self._extract_section(soap_text, "SUBJECTIVE")
                 objective = self._extract_section(soap_text, "OBJECTIVE")
                 assessment = self._extract_section(soap_text, "ASSESSMENT")
                 plan = self._extract_section(soap_text, "PLAN")
                 meta_json = self._extract_section(soap_text, "METADATA")
                 try:
-                    # Clean embedded JSON if needed
-                    clean_meta = meta_json.strip()
-                    if "```" in clean_meta:
-                        clean_meta = re.sub(r"```[a-z]*\n?", "", clean_meta).replace("```", "").strip()
-                    # Ensure we have a valid JSON object
-                    json_match = re.search(r'(\{.*\})', clean_meta, re.DOTALL)
-                    if json_match:
-                        meta_data = json.loads(json_match.group(1))
-                    else:
-                        meta_data = json.loads(clean_meta)
+                    meta_data = json.loads(meta_json)
                 except:
                     print(f"[AI DEBUG] Metadata JSON parsing failed.")
 
