@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from api import auth, patients, triage
+from api import auth, patients, triage, ehr
 
 app = FastAPI(
     title="VaidyaSaarathi API",
@@ -21,6 +21,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(patients.router)
 app.include_router(triage.router)
+app.include_router(ehr.router)
 
 @app.get("/")
 def read_root():

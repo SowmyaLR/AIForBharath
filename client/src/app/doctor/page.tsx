@@ -2,7 +2,8 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/components/AuthProvider';
 import { useRouter } from 'next/navigation';
-import { Stethoscope, Activity, CheckCircle2, ShieldAlert, LogOut, Clock, BrainCircuit, HeartPulse } from 'lucide-react';
+import { Stethoscope, Activity, CheckCircle2, ShieldAlert, LogOut, Clock, BrainCircuit, HeartPulse, Database } from 'lucide-react';
+import Link from 'next/link';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 
@@ -12,6 +13,8 @@ export default function DoctorPage() {
     const [queue, setQueue] = useState<any[]>([]);
     const [selectedPatient, setSelectedPatient] = useState<any | null>(null);
     const [editedSoap, setEditedSoap] = useState<any>(null);
+    const [isSaving, setIsSaving] = useState(false);
+    const [saveStatus, setSaveStatus] = useState<string>('');
 
     useEffect(() => {
         if (!isLoading && (!user || user.role !== 'doctor')) {
@@ -42,24 +45,58 @@ export default function DoctorPage() {
     const selectPatient = (patient: any) => {
         setSelectedPatient(patient);
         setEditedSoap(patient.soap_note ? { ...patient.soap_note } : { subjective: '', objective: '', assessment: '', plan: '' });
+        setSaveStatus('');
     };
 
     const handleSoapChange = (section: string, value: string) => {
         if (editedSoap) {
             setEditedSoap({ ...editedSoap, [section]: value });
+            setSaveStatus('');
+        }
+    };
+
+    const saveSoap = async () => {
+        if (!selectedPatient || !editedSoap) return;
+        setIsSaving(true);
+        try {
+            await axios.post(`http://localhost:8000/triage/${selectedPatient.id}/soap`, editedSoap);
+            setSaveStatus('Draft saved successfully');
+            // Update local state in queue if needed
+            fetchQueue();
+        } catch (e) {
+            console.error(e);
+            setSaveStatus('Error saving draft');
+        } finally {
+            setIsSaving(false);
         }
     };
 
     const approveTriage = async () => {
         if (!selectedPatient) return;
         try {
+            // First save any unsaved changes
+            await axios.post(`http://localhost:8000/triage/${selectedPatient.id}/soap`, editedSoap);
+
             await axios.post(`http://localhost:8000/triage/${selectedPatient.id}/finalize`);
-            alert("Triage approved and exported to EHR successfully.");
+            alert("Triage approved successfully. You can now move it to EHR.");
             setSelectedPatient({ ...selectedPatient, status: 'finalized' });
             fetchQueue();
         } catch (e) {
             console.error(e);
             alert("Error finalizing triage");
+        }
+    };
+
+    const moveToEhr = async () => {
+        if (!selectedPatient) return;
+        try {
+            await axios.post(`http://localhost:8000/triage/${selectedPatient.id}/export`);
+            alert("Record is being exported to FHIR format in the background. You can view it in the FHIR Viewer later.");
+            setSelectedPatient(null);
+            fetchQueue();
+        } catch (e) {
+            console.error(e);
+            alert("Error starting EHR export");
         }
     };
 
@@ -75,9 +112,16 @@ export default function DoctorPage() {
             <nav className="bg-white shadow-sm border-b border-slate-200 sticky top-0 z-50">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                     <div className="flex justify-between h-16">
-                        <div className="flex items-center gap-2 text-primary font-bold text-xl">
-                            <Stethoscope className="h-6 w-6" />
-                            VaidyaSaarathi
+                        <div className="flex items-center gap-6">
+                            <div className="flex items-center gap-2 text-primary font-bold text-xl">
+                                <Stethoscope className="h-6 w-6" />
+                                VaidyaSaarathi
+                            </div>
+                            <div className="h-6 w-[1px] bg-slate-200" />
+                            <Link href="/ehr-records" className="flex items-center gap-2 text-slate-500 hover:text-teal-600 transition-colors">
+                                <Database size={18} />
+                                <span className="text-sm font-bold">FHIR Viewer</span>
+                            </Link>
                         </div>
                         <div className="flex items-center gap-4">
                             <div className="flex flex-col items-end">
@@ -212,16 +256,36 @@ export default function DoctorPage() {
                                 </div>
 
                                 <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-between items-center">
-                                    <div className="flex items-center gap-2 text-xs text-amber-600 font-medium bg-amber-100 px-3 py-1.5 rounded-lg border border-amber-200">
-                                        <ShieldAlert size={14} /> AI is an assistant. Validate before saving.
+                                    <div className="flex flex-col gap-1">
+                                        <div className="flex items-center gap-2 text-xs text-amber-600 font-medium bg-amber-100 px-3 py-1.5 rounded-lg border border-amber-200">
+                                            <ShieldAlert size={14} /> AI is an assistant. Validate before saving.
+                                        </div>
+                                        {saveStatus && <p className={`text-xs font-bold px-1 ${saveStatus.includes('Error') ? 'text-red-500' : 'text-green-600'}`}>{saveStatus}</p>}
                                     </div>
 
-                                    {selectedPatient.status !== 'finalized' && (
+                                    {selectedPatient.status !== 'finalized' ? (
+                                        <div className="flex gap-3">
+                                            <button
+                                                onClick={saveSoap}
+                                                disabled={isSaving}
+                                                className="px-6 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-700 font-bold hover:bg-slate-50 transition-all flex items-center gap-2"
+                                            >
+                                                {isSaving ? <Activity className="animate-spin" size={18} /> : <CheckCircle2 size={18} className="text-teal-500" />}
+                                                Save Draft
+                                            </button>
+                                            <button
+                                                onClick={approveTriage}
+                                                className="px-6 py-2.5 rounded-xl bg-slate-900 text-white font-bold hover:bg-slate-800 shadow-lg shadow-slate-900/20 transition-all flex items-center gap-2"
+                                            >
+                                                <CheckCircle2 size={18} /> Approve & Finalize
+                                            </button>
+                                        </div>
+                                    ) : (
                                         <button
-                                            onClick={approveTriage}
-                                            className="px-6 py-2.5 rounded-xl bg-slate-900 text-white font-bold hover:bg-slate-800 shadow-lg shadow-slate-900/20 transition-all flex items-center gap-2"
+                                            onClick={moveToEhr}
+                                            className="px-6 py-2.5 rounded-xl bg-teal-600 text-white font-bold hover:bg-teal-700 shadow-lg shadow-teal-900/20 transition-all flex items-center gap-2"
                                         >
-                                            <CheckCircle2 size={18} /> Approve & Export to EHR
+                                            <Activity size={18} /> Move to EHR (FHIR)
                                         </button>
                                     )}
                                 </div>

@@ -86,6 +86,13 @@ class TriageService:
             record.updated_at = datetime.utcnow()
         return record
 
+    async def update_soap_note(self, triage_id: str, soap_note: SOAPNote) -> Optional[TriageRecord]:
+        record = MOCK_TRIAGES.get(triage_id)
+        if record and record.status != "finalized":
+            record.soap_note = soap_note
+            record.updated_at = datetime.utcnow()
+        return record
+
     async def get_triage_queue(self, specialty: Optional[str] = None) -> List[TriageRecord]:
         """Get triage queue, optionally filtered by specialty"""
         records = list(MOCK_TRIAGES.values())

@@ -126,9 +126,47 @@ async def add_vitals(triage_id: str, vitals: VitalSigns):
          raise HTTPException(status_code=404, detail="Triage record not found")
     return record
 
+@router.post("/{triage_id}/soap", response_model=TriageRecord)
+async def update_soap(triage_id: str, soap_note: SOAPNote):
+    record = await triage_service.update_soap_note(triage_id, soap_note)
+    if not record:
+         raise HTTPException(status_code=404, detail="Triage record not found or already finalized")
+    return record
+
 @router.post("/{triage_id}/finalize", response_model=TriageRecord)
 async def finalize_triage(triage_id: str):
     record = await triage_service.update_triage_status(triage_id, "finalized")
     if not record:
          raise HTTPException(status_code=404, detail="Triage record not found")
     return record
+
+async def _process_ehr_export_task(triage_id: str):
+    """Background task to run FHIR generation and mock export"""
+    from services.ehr_service import ehr_service
+    record = await triage_service.get_triage(triage_id)
+    if not record: return
+    
+    try:
+        print(f"[EHR DEBUG] Background export started for triage {triage_id}")
+        success = await ehr_service.export_to_ehr(record)
+        if success:
+            await triage_service.update_triage_status(triage_id, "exported")
+            print(f"[EHR DEBUG] Background export successful for triage {triage_id}")
+        else:
+            print(f"[EHR ERROR] Background export failed for triage {triage_id}")
+    except Exception as e:
+        print(f"[EHR ERROR] Background export task failed: {e}")
+
+@router.post("/{triage_id}/export")
+async def export_triage(triage_id: str, background_tasks: BackgroundTasks):
+    record = await triage_service.get_triage(triage_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Triage record not found")
+        
+    if record.status != "finalized":
+        raise HTTPException(status_code=400, detail="Triage must be finalized before export")
+    
+    # Trigger background processing
+    background_tasks.add_task(_process_ehr_export_task, triage_id)
+    
+    return {"status": "accepted", "message": "EHR Export started in background"}
