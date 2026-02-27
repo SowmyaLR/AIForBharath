@@ -19,7 +19,7 @@ services:
       # These are read by ai_service.py to switch backends
       - APP_ENV=${APP_ENV:-dev}
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
-      - HF_TOKEN=${HF_TOKEN:-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}
+      - HF_TOKEN=${HF_TOKEN:-}
       - AWS_REGION=${AWS_REGION:-ap-south-1}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
