@@ -1,0 +1,115 @@
+# NHCX / ABDM FHIR Profile Configuration
+# Modify this file to switch use_case or adjust FHIR profile URLs without code changes.
+
+use_case: claim_submission   # Options: claim_submission | pre_authorisation
+
+nhcx:
+  profile_url: "https://nrces.in/ndhm/fhir/r4/StructureDefinition/Bundle"
+  claim_type:
+    system: "http://terminology.hl7.org/CodeSystem/claim-type"
+    code: "institutional"
+    display: "Institutional"
+  claim_subtype:
+    system: "https://nrces.in/ndhm/fhir/r4/CodeSystem/ndhm-claimsubtype"
+    code: "inpatient"
+    display: "Inpatient Claim"
+  use_code:
+    system: "http://terminology.hl7.org/CodeSystem/claim-use"
+    code: "claim"        # 'claim' for claim, 'preauthorization' for pre-auth
+    display: "Claim"
+
+fhir:
+  version: "4.0.1"
+  base_url: "https://nrces.in/ndhm/fhir/r4"
+  patient_system: "https://healthid.ndhm.gov.in"
+  provider_system: "https://facility.ndhm.gov.in"
+  payer_system: "https://ins.abdm.gov.in"
+
+hi_types:
+  discharge_summary:
+    loinc_code: "18842-5"
+    display: "Discharge summary"
+    fhir_resource: "Composition"
+    keywords:
+      - "discharge summary"
+      - "discharge date"
+      - "admitted"
+      - "inpatient"
+      - "ward"
+      - "hospital stay"
+      - "date of admission"
+      - "date of discharge"
+      - "final diagnosis"
+
+  lab_report:
+    loinc_code: "11502-2"
+    display: "Laboratory report"
+    fhir_resource: "DiagnosticReport"
+    keywords:
+      - "lab report"
+      - "laboratory"
+      - "test result"
+      - "hemoglobin"
+      - "hba1c"
+      - "cbc"
+      - "serology"
+      - "pathology"
+      - "culture"
+      - "biopsy"
+      - "reference range"
+      - "specimen"
+
+  clinical_note:
+    loinc_code: "11488-4"
+    display: "Consult note"
+    fhir_resource: "Composition"
+    keywords:
+      - "consultation"
+      - "outpatient"
+      - "opd"
+      - "clinical note"
+      - "progress note"
+      - "subjective"
+      - "objective"
+      - "assessment"
+      - "plan"
+      - "soap"
+
+  prescription:
+    loinc_code: "57833-6"
+    display: "Prescription for medication"
+    fhir_resource: "MedicationRequest"
+    keywords:
+      - "prescription"
+      - "rx"
+      - "tablet"
+      - "capsule"
+      - "dosage"
+      - "mg"
+      - "twice daily"
+      - "once daily"
+      - "prescribed"
+
+  radiology_report:
+    loinc_code: "18748-4"
+    display: "Diagnostic imaging study"
+    fhir_resource: "DiagnosticReport"
+    keywords:
+      - "x-ray"
+      - "xray"
+      - "mri"
+      - "ct scan"
+      - "ultrasound"
+      - "echo"
+      - "echocardiogram"
+      - "radiograph"
+      - "impression"
+      - "findings"
+
+medgemma:
+  enabled: true
+  ollama_host: "http://localhost:11434"
+  model: "alibayram/medgemma"
+  fallback_on_error: true
+  max_tokens: 3000
+  temperature: 0.1

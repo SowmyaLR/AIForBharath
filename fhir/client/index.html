@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NHCX FHIR Converter — Claim Submission | ABDM</title>
+  <meta name="description" content="Convert healthcare PDFs (discharge summaries, lab reports) into ABDM FHIR R4 bundles and NHCX Claim profiles." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ── Header ─────────────────────────────────────────────────────── -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🏥</div>
+      <div class="logo-text">NHCX <span>FHIR</span> Converter</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <span id="server-status" style="font-size:12px;color:var(--text-dim)">Checking server…</span>
+      <span class="badge-abdm">ABDM ✦ NHCX</span>
+    </div>
+  </header>
+
+  <!-- ── Main ───────────────────────────────────────────────────────── -->
+  <main>
+
+    <!-- Hero -->
+    <div class="hero">
+      <h1>PDF → NHCX Claim Bundle</h1>
+      <p>Upload discharge summaries, lab reports, and clinical notes. Auto-detects document type and generates an ABDM FHIR R4 bundle conforming to NHCX Claim profiles.</p>
+    </div>
+
+    <!-- Two-column grid -->
+    <div class="grid-2">
+
+      <!-- ── LEFT: Input ─────────────────────────────────────────────── -->
+      <div class="card">
+        <div class="card-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          Healthcare Documents
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="pdf">📎 Upload PDFs</button>
+          <button class="tab-btn" data-tab="text">📝 Paste Text</button>
+        </div>
+
+        <!-- ── PDF Tab ── -->
+        <div class="tab-panel active" id="tab-pdf">
+
+          <!-- Drop zone -->
+          <div class="drop-zone" id="drop-zone">
+            <input type="file" id="file-input" accept=".pdf,application/pdf" multiple />
+            <div class="dz-icon">📂</div>
+            <p class="dz-label"><strong>Drag &amp; drop PDFs here</strong> or click to browse</p>
+            <p class="dz-hint">Discharge summaries · Lab reports · Clinical notes · Radiology · Prescriptions</p>
+          </div>
+
+          <!-- File list -->
+          <div id="file-list"></div>
+
+          <!-- Patient / insurer metadata -->
+          <div class="form-grid">
+            <div class="field">
+              <label>Patient Name <span style="color:var(--text-dim)">(optional)</span></label>
+              <input type="text" id="patient-name" placeholder="e.g. Priya Sharma" />
+            </div>
+            <div class="field">
+              <label>ABHA / Health ID <span style="color:var(--text-dim)">(optional)</span></label>
+              <input type="text" id="patient-id" placeholder="e.g. 91-1234-5678-9012" />
+            </div>
+            <div class="field">
+              <label>Insurer Name <span style="color:var(--text-dim)">(optional)</span></label>
+              <input type="text" id="insurer-name" placeholder="e.g. Star Health" />
+            </div>
+            <div class="field">
+              <label>Policy Number <span style="color:var(--text-dim)">(optional)</span></label>
+              <input type="text" id="policy-number" placeholder="e.g. POL-2024-123456" />
+            </div>
+          </div>
+
+          <button class="btn-convert" id="btn-convert" disabled>
+            <span>Generate NHCX Claim Bundle</span>
+          </button>
+        </div>
+
+        <!-- ── Text Tab ── -->
+        <div class="tab-panel" id="tab-text">
+          <textarea
+            id="paste-area"
+            class="text-area"
+            placeholder="Paste a SOAP note, discharge summary, or clinical note here…
+
+Example:
+Patient: Mr. Rajan, 58 years
+Admitted: 2024-01-15 | Discharged: 2024-01-20
+Chief Complaint: Chest pain, breathlessness
+Diagnosis: Acute STEMI — LAD territory
+Procedure: Primary PCI with drug-eluting stent
+Medications: Aspirin 75mg OD, Clopidogrel 75mg OD
+Discharge Condition: Stable"
+          ></textarea>
+
+          <div class="form-grid">
+            <div class="field">
+              <label>Patient Name</label>
+              <input type="text" id="pt-name-text" placeholder="Optional" />
+            </div>
+            <div class="field">
+              <label>ABHA ID</label>
+              <input type="text" id="pt-id-text" placeholder="Optional" />
+            </div>
+            <div class="field">
+              <label>Insurer</label>
+              <input type="text" id="insurer-text" placeholder="Optional" />
+            </div>
+          </div>
+
+          <button class="btn-convert" id="btn-convert-text" style="margin-top:18px">
+            <span>Generate NHCX Claim Bundle</span>
+          </button>
+        </div>
+
+      </div><!-- /card left -->
+
+      <!-- ── RIGHT: Output ────────────────────────────────────────────── -->
+      <div class="card output-panel">
+
+        <div class="output-top">
+          <div class="card-title" style="margin-bottom:0">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            FHIR Bundle Output
+          </div>
+          <div class="status-bar">
+            <div class="status-dot" id="status-dot"></div>
+            <span id="status-label" style="color:var(--text-dim);font-size:12px">Waiting for input</span>
+          </div>
+        </div>
+
+        <!-- Detected HI type badges + metadata -->
+        <div class="result-meta" id="result-meta"></div>
+
+        <!-- JSON viewer -->
+        <div class="json-viewer" id="json-viewer">
+          <div class="empty-state">
+            <div class="es-icon">🔬</div>
+            <p>Upload PDFs or paste clinical text to generate your NHCX FHIR bundle</p>
+          </div>
+        </div>
+
+        <!-- Download -->
+        <button class="btn-download" id="btn-download">
+          ⬇ Download FHIR Bundle (.json)
+        </button>
+
+      </div><!-- /card right -->
+
+    </div><!-- /grid-2 -->
+
+    <!-- ── Info strip ────────────────────────────────────────────────── -->
+    <div style="display:flex;gap:14px;margin-top:20px;flex-wrap:wrap;">
+
+      <div class="card" style="flex:1;min-width:200px;padding:18px 22px;">
+        <div style="font-size:22px;margin-bottom:6px">🔍</div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:4px">Auto HI-Type Detection</div>
+        <div style="font-size:12px;color:var(--text-secondary)">Classifies each document as Discharge Summary, Lab Report, Radiology, Prescription, or Clinical Note using keyword scoring.</div>
+      </div>
+
+      <div class="card" style="flex:1;min-width:200px;padding:18px 22px;">
+        <div style="font-size:22px;margin-bottom:6px">🤖</div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:4px">MedGemma Extraction</div>
+        <div style="font-size:12px;color:var(--text-secondary)">Uses MedGemma via Ollama for rich clinical data extraction. Falls back to deterministic mode if AI is unavailable.</div>
+      </div>
+
+      <div class="card" style="flex:1;min-width:200px;padding:18px 22px;">
+        <div style="font-size:22px;margin-bottom:6px">📋</div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:4px">NHCX Claim Bundle</div>
+        <div style="font-size:12px;color:var(--text-secondary)">Outputs a FHIR R4 Bundle with a Claim resource linking all documents as <code style="font-size:11px">supportingInfo</code>. ABDM NRCeS profile conformant.</div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <footer>
+    <p>
+      Open-source NHCX FHIR Converter &mdash;
+      <a href="https://nrces.in/ndhm/fhir/r4" target="_blank">ABDM FHIR Profiles</a>
+      &nbsp;|&nbsp;
+      <a href="http://localhost:8001/docs" target="_blank">API Docs (Swagger)</a>
+      &nbsp;|&nbsp;
+      Built for the AI For Bharat Hackathon
+    </p>
+  </footer>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
