@@ -1,16 +1,17 @@
 import os
 import io
 import re
+import json
+import time
 import librosa
 import numpy as np
 import tempfile
-import time
 import requests
 import warnings
 import tensorflow as tf
 from huggingface_hub import snapshot_download
 from sklearn.metrics.pairwise import cosine_similarity
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from transformers import pipeline
 from faster_whisper import WhisperModel
 
@@ -19,9 +20,23 @@ warnings.filterwarnings("ignore", category=UserWarning, module="librosa")
 warnings.filterwarnings("ignore", category=FutureWarning, module="librosa")
 warnings.filterwarnings("ignore", message=".*return_token_timestamps.*")
 
-import json
-
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+APP_ENV = os.getenv("APP_ENV", "dev")  # 'dev' = Ollama | 'demo' = SageMaker
+SAGEMAKER_MEDGEMMA_ENDPOINT = os.getenv("SAGEMAKER_MEDGEMMA_ENDPOINT", "")
+
+if APP_ENV == "demo":
+    try:
+        import boto3
+        _sm_runtime = boto3.client("sagemaker-runtime", region_name=os.getenv("AWS_REGION", "ap-south-1"))
+        print(f"[ENV] DEMO mode: SageMaker backend active (endpoint: {SAGEMAKER_MEDGEMMA_ENDPOINT})")
+    except ImportError:
+        print("[ENV WARNING] boto3 not installed. Falling back to Ollama.")
+        APP_ENV = "dev"
+        _sm_runtime = None
+else:
+    _sm_runtime = None
+    print(f"[ENV] DEV mode: Ollama backend active ({OLLAMA_HOST})")
+
 
 # Clinical Triage Constants
 TRIAGE_BUCKETS = {
@@ -282,28 +297,11 @@ class AudioProcessor:
         print(f"[AI DEBUG] Ollama Prompt Built ({len(prompt)} chars)")
         
         t_start = time.time()
+        soap_text = self._call_inference_backend(prompt)
+        t_end = time.time()
+        print(f"[AI DEBUG] SOAP Generation Time: {t_end - t_start:.2f}s")
+        print(f"\n[AI DEBUG] --- RAW RESPONSE START ---\n{soap_text}\n[AI DEBUG] --- RAW RESPONSE END ---\n")
         try:
-            response = requests.post(
-                f"{OLLAMA_HOST}/api/generate",
-                json={
-                    "model": "alibayram/medgemma",
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "num_predict": 512,
-                        "temperature": 0.1,
-                        "num_thread": 4 # Optimize based on local hardware
-                    }
-                }
-            )
-            response.raise_for_status()
-            t_end = time.time()
-            print(f"[AI DEBUG] SOAP Generation Time: {t_end - t_start:.2f}s")
-            
-            result = response.json()
-            soap_text = result.get("response", "Error generating note.")
-            print(f"\n[AI DEBUG] --- RAW OLLAMA RESPONSE START ---\n{soap_text}\n[AI DEBUG] --- RAW OLLAMA RESPONSE END ---\n")
-            
             # 1. Clean response (remove markdown fences and trailing text)
             clean_response = soap_text.strip()
             # Find the outermost { } to handle any preamble/postamble
@@ -341,7 +339,7 @@ class AudioProcessor:
                 try:
                     meta_data = json.loads(meta_json)
                 except:
-                    print(f"[AI DEBUG] Metadata JSON parsing failed.")
+                    print("[AI DEBUG] Metadata JSON parsing failed.")
 
             # New Bucket-Based Triage Flow
             final_tier, assigned_specialty = self._calculate_bucket_triage(
@@ -357,15 +355,47 @@ class AudioProcessor:
                     "assessment": assessment,
                     "plan": plan
                 },
-                "specialty": assigned_specialty, 
+                "specialty": assigned_specialty,
                 "risk_score": BUCKET_SCORES.get(final_tier, 0),
                 "triage_tier": final_tier
             }
             print(f"[AI DEBUG] Final Parsed Analysis: {assigned_specialty}, Tier: {final_tier}")
             return final_analysis
         except Exception as e:
-            print(f"[AI DEBUG] Ollama Error: {e}")
+            print(f"[AI DEBUG] Inference Error: {e}")
             return {"soap": {"subjective": "Error generating note."}, "specialty": "General Medicine", "risk_score": 0}
+
+    def _call_inference_backend(self, prompt: str) -> str:
+        """
+        Dispatches to the correct AI backend based on APP_ENV.
+        DEV  → Ollama (local)
+        DEMO → AWS SageMaker Real-Time Inference
+        """
+        if APP_ENV == "demo" and _sm_runtime and SAGEMAKER_MEDGEMMA_ENDPOINT:
+            print(f"[ENV] Calling SageMaker endpoint: {SAGEMAKER_MEDGEMMA_ENDPOINT}")
+            response = _sm_runtime.invoke_endpoint(
+                EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
+                ContentType="application/json",
+                Body=json.dumps({"inputs": prompt, "parameters": {"max_new_tokens": 512, "temperature": 0.1}})
+            )
+            result = json.loads(response["Body"].read().decode("utf-8"))
+            # SageMaker HuggingFace TGI schema: [{"generated_text": "..."}]
+            if isinstance(result, list) and result:
+                return result[0].get("generated_text", "")
+            return result.get("generated_text", str(result))
+        else:
+            # Default: Ollama
+            response = requests.post(
+                f"{OLLAMA_HOST}/api/generate",
+                json={
+                    "model": "alibayram/medgemma",
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"num_predict": 512, "temperature": 0.1, "num_thread": 4}
+                }
+            )
+            response.raise_for_status()
+            return response.json().get("response", "Error generating note.")
 
     def _calculate_bucket_triage(self, transcript: str, ai_meta: dict, acoustic_score: float) -> tuple:
         """Implements the 4-tier bucket flow: AI -> Guardrail -> Acoustic Escalation"""
@@ -414,6 +444,22 @@ class AudioProcessor:
             "general": "General Medicine"
         }
         assigned_specialty = specialties.get(primary_category, "General Medicine")
+
+        # ── ZONE DECISION SUMMARY LOG ──────────────────────────────────────
+        zone_emoji = {"EMERGENCY": "🔴", "URGENT": "🟠", "SEMI_URGENT": "🟡", "ROUTINE": "🟢"}
+        print(
+            f"\n{'─'*50}\n"
+            f"  ZONE DECISION SUMMARY\n"
+            f"{'─'*50}\n"
+            f"  MedGemma Initial Tier : {ai_tier}\n"
+            f"  After Guardrail Check : {[k for k,v in TRIAGE_BUCKETS.items() if v == min(current_rank, TRIAGE_BUCKETS['EMERGENCY'])][0]}\n"
+            f"  Acoustic Score        : {acoustic_score:.1f}/10\n"
+            f"  ─────────────────────\n"
+            f"  FINAL ZONE            : {zone_emoji.get(final_tier, '⬜')} {final_tier}\n"
+            f"  Assigned Specialty    : {assigned_specialty}\n"
+            f"{'─'*50}\n"
+        )
+        # ──────────────────────────────────────────────────────────────────
 
         return final_tier, assigned_specialty
 

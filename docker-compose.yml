@@ -1,0 +1,43 @@
+# ════════════════════════════════════════════════════════════════
+#  VaidyaSaarathi - Docker Compose
+#
+#  DEV  (Ollama local):   docker-compose --env-file server/.env.dev up
+#  DEMO (AWS SageMaker):  docker-compose --env-file server/.env.demo up
+# ════════════════════════════════════════════════════════════════
+services:
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: vaidyasaarathi-api:${APP_ENV:-dev}
+    container_name: vaidyasaarathi-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./server/.env.${APP_ENV:-dev}
+    environment:
+      # These are read by ai_service.py to switch backends
+      - APP_ENV=${APP_ENV:-dev}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - HF_TOKEN=${HF_TOKEN:-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}
+      - AWS_REGION=${AWS_REGION:-ap-south-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - SAGEMAKER_MEDGEMMA_ENDPOINT=${SAGEMAKER_MEDGEMMA_ENDPOINT:-}
+      - SAGEMAKER_WHISPER_ENDPOINT=${SAGEMAKER_WHISPER_ENDPOINT:-}
+    volumes:
+      # Persist audio uploads across restarts
+      - ./server/storage:/app/storage
+      # Mount pre-downloaded model caches from Mac host to avoid re-downloading in container
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ~/.cache/whisper:/root/.cache/whisper
+    extra_hosts:
+      # Allows container to reach Ollama on Mac host (dev mode)
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s

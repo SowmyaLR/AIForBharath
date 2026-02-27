@@ -209,3 +209,5 @@ __marimo__/
 client/storage
 server/storage
 storage/
+.env.demo
+.env.dev

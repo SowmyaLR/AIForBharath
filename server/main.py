@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api import auth, patients, triage, ehr
+import os
 
 app = FastAPI(
     title="VaidyaSaarathi API",
@@ -25,13 +26,17 @@ app.include_router(ehr.router)
 
 @app.get("/")
 def read_root():
+    app_env = os.getenv("APP_ENV", "dev")
+    backend = "AWS SageMaker" if app_env == "demo" else f"Ollama ({os.getenv('OLLAMA_HOST', 'http://localhost:11434')})"
     return {
         "status": "online",
+        "environment": app_env.upper(),
         "message": "VaidyaSaarathi Backend API is running.",
-        "models_status": {
-            "Ollama": "Reachable via API", # Health check in a real app
-            "Whisper": "Local HF Model",
-            "HeAR": "Local HF Model/Fallback"
+        "inference_backend": backend,
+        "models": {
+            "MedGemma": "sagemaker" if app_env == "demo" else "ollama",
+            "Whisper": "faster-whisper (local)",
+            "HeAR": "google/hear (local HuggingFace)"
         }
     }
 

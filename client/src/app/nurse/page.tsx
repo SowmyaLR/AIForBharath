@@ -2,9 +2,9 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '@/components/AuthProvider';
 import { useRouter } from 'next/navigation';
-import { Mic, Square, Save, Activity, UploadCloud, Users, LogOut, Thermometer, Droplets, HeartPulse, Wind } from 'lucide-react';
+import { Mic, Square, Save, Activity, UploadCloud, Users, LogOut, Thermometer, Droplets, HeartPulse, Wind, AlertTriangle, Circle, Shield, Info } from 'lucide-react';
 import axios from 'axios';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 
 export default function NurseIntakePage() {
     const { user, token, logout, isLoading } = useAuth();
@@ -25,6 +25,9 @@ export default function NurseIntakePage() {
     const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
     const [uploadStatus, setUploadStatus] = useState<string>('');
     const [recordingTime, setRecordingTime] = useState(0);
+    const [triageId, setTriageId] = useState<string | null>(null);
+    const [finalZone, setFinalZone] = useState<string | null>(null);
+    const [isPolling, setIsPolling] = useState(false);
 
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const chunksRef = useRef<Blob[]>([]);
@@ -53,6 +56,8 @@ export default function NurseIntakePage() {
                 alert("Microphone API is not available. Please ensure you are accessing the app via 'localhost' or HTTPS.");
                 return;
             }
+            setFinalZone(null);
+            setTriageId(null);
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
 
@@ -104,15 +109,20 @@ export default function NurseIntakePage() {
         formData.append('spo2', vitals.spo2.toString());
 
         try {
-            await axios.post('http://localhost:8000/triage/', formData, {
+            const res = await axios.post('http://localhost:8000/triage/', formData, {
                 headers: {
                     'Content-Type': 'multipart/form-data',
                 }
             });
+            const newTriageId = res.data.id;
+            setTriageId(newTriageId);
             setUploadStatus('success');
+
+            // Start polling for the zone
+            pollTriageStatus(newTriageId);
+
             setTimeout(() => {
                 setAudioBlob(null);
-                setUploadStatus('');
                 setRecordingTime(0);
                 // Reset vitals for next patient
                 setVitals({
@@ -128,6 +138,43 @@ export default function NurseIntakePage() {
             console.error(err);
             setUploadStatus('error');
         }
+    };
+
+    const pollTriageStatus = async (id: string) => {
+        setIsPolling(true);
+        const maxAttempts = 6; // 6 × 20s = 2 minutes total
+        let attempts = 0;
+
+        const interval = setInterval(async () => {
+            try {
+                const res = await axios.get(`http://localhost:8000/triage/${id}`);
+                const currentStatus = res.data.status;
+
+                // Update uploadStatus to show current backend state in the button/loader if needed
+                if (currentStatus === 'in_progress') {
+                    setUploadStatus('processing');
+                }
+
+                // Any terminal status should stop polling and show the result
+                const terminalStatuses = ['ready_for_review', 'finalized', 'exported'];
+                if (terminalStatuses.includes(currentStatus)) {
+                    setFinalZone(res.data.triage_tier || 'ROUTINE');
+                    setIsPolling(false);
+                    clearInterval(interval);
+                    setUploadStatus('processed');
+                }
+            } catch (e) {
+                console.error("Polling error:", e);
+            }
+
+            attempts++;
+            if (attempts >= maxAttempts) {
+                setIsPolling(false);
+                clearInterval(interval);
+                // If we timeout, we might want to show a default or error
+                if (!finalZone) setUploadStatus('error');
+            }
+        }, 20000); // Poll every 20 seconds
     };
 
     const formatTime = (seconds: number) => {
@@ -282,20 +329,92 @@ export default function NurseIntakePage() {
                                 <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="w-full">
                                     <button
                                         onClick={submitTriage}
-                                        disabled={uploadStatus === 'uploading'}
+                                        disabled={uploadStatus === 'uploading' || isPolling || uploadStatus === 'processed'}
                                         className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-2 shadow-2xl transition-all
-                                    ${uploadStatus === 'success' ? 'bg-green-500 text-white shadow-green-200' :
+                                    ${(uploadStatus === 'success' || uploadStatus === 'processed') && !isPolling ? 'bg-green-500 text-white shadow-green-200' :
                                                 uploadStatus === 'error' ? 'bg-red-500 text-white shadow-red-200' :
                                                     'bg-teal-600 text-white hover:bg-teal-700 shadow-teal-200'}
                                 `}
                                     >
-                                        {uploadStatus === 'uploading' && <><Activity className="animate-spin" /> Analyzing Triage Case...</>}
-                                        {uploadStatus === 'success' && <>Triage Case Created Successfully!</>}
+                                        {(uploadStatus === 'uploading' || isPolling) && <><Activity className="animate-spin" /> AI Triage Processing...</>}
+                                        {(uploadStatus === 'success' || uploadStatus === 'processed') && !isPolling && <>Triage Case Created Successfully!</>}
                                         {uploadStatus === 'error' && <>Submission Failed. Retry?</>}
                                         {uploadStatus === '' && <><UploadCloud /> Submit Triage Case</>}
                                     </button>
                                 </motion.div>
                             )}
+
+                            {/* Universal Zone Indicator */}
+                            <AnimatePresence>
+                                {(isPolling || finalZone) && (
+                                    <motion.div
+                                        initial={{ opacity: 0, y: 20 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        exit={{ opacity: 0, y: 10 }}
+                                        className="mt-8 w-full"
+                                    >
+                                        <div className={`p-6 rounded-2xl border-2 flex flex-col items-center gap-4 transition-all duration-500 ${isPolling ? 'bg-slate-50 border-slate-200 border-dashed' :
+                                            finalZone === 'EMERGENCY' ? 'bg-red-50 border-red-200 shadow-lg shadow-red-100' :
+                                                finalZone === 'URGENT' ? 'bg-orange-50 border-orange-200 shadow-lg shadow-orange-100' :
+                                                    finalZone === 'SEMI_URGENT' ? 'bg-yellow-50 border-yellow-200 shadow-lg shadow-yellow-100' :
+                                                        'bg-green-50 border-green-200 shadow-lg shadow-green-100'
+                                            }`}>
+                                            <div className="flex items-center gap-3 self-start">
+                                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white ${isPolling ? 'bg-slate-400' :
+                                                    finalZone === 'EMERGENCY' ? 'bg-red-500' :
+                                                        finalZone === 'URGENT' ? 'bg-orange-500' :
+                                                            finalZone === 'SEMI_URGENT' ? 'bg-yellow-500' :
+                                                                'bg-green-500'
+                                                    }`}>
+                                                    <Info size={18} />
+                                                </div>
+                                                <div>
+                                                    <h4 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Patient Care Path</h4>
+                                                    <p className="text-[10px] text-slate-500 font-medium">Automatic Zone Assignment</p>
+                                                </div>
+                                            </div>
+
+                                            {isPolling ? (
+                                                <div className="flex flex-col items-center py-4">
+                                                    <Activity className="text-teal-500 animate-spin mb-3" size={32} />
+                                                    <p className="text-sm font-bold text-slate-600">AI Reasoning in progress...</p>
+                                                    <p className="text-[11px] text-slate-400">
+                                                        Status: <span className="uppercase font-bold text-teal-600">
+                                                            {uploadStatus === 'processing' ? 'Processing Model' : 'In Queue'}
+                                                        </span>
+                                                    </p>
+                                                </div>
+                                            ) : (
+                                                <div className="flex flex-col items-center w-full py-4 text-center">
+                                                    <div className={`mb-4 w-20 h-20 rounded-3xl flex items-center justify-center shadow-lg transition-transform hover:scale-105 duration-300 ${finalZone === 'EMERGENCY' ? 'bg-red-500 text-white' :
+                                                        finalZone === 'URGENT' ? 'bg-orange-500 text-white' :
+                                                            finalZone === 'SEMI_URGENT' ? 'bg-yellow-500 text-white' :
+                                                                'bg-green-500 text-white'
+                                                        }`}>
+                                                        {finalZone === 'EMERGENCY' && <AlertTriangle size={48} />}
+                                                        {finalZone === 'URGENT' && <Square size={40} className="fill-current" />}
+                                                        {finalZone === 'SEMI_URGENT' && <Circle size={48} className="fill-current" />}
+                                                        {finalZone === 'ROUTINE' && <Shield size={48} />}
+                                                    </div>
+                                                    <h2 className={`text-2xl font-black uppercase tracking-tighter ${finalZone === 'EMERGENCY' ? 'text-red-600' :
+                                                        finalZone === 'URGENT' ? 'text-orange-600' :
+                                                            finalZone === 'SEMI_URGENT' ? 'text-yellow-600' :
+                                                                'text-green-600'
+                                                        }`}>
+                                                        {finalZone} ZONE
+                                                    </h2>
+                                                    <p className="mt-2 text-sm font-bold text-slate-700 max-w-[200px]">
+                                                        {finalZone === 'EMERGENCY' ? "Needs Immediate Critical Intervention" :
+                                                            finalZone === 'URGENT' ? "Prioritize High-Risk Evaluation" :
+                                                                finalZone === 'SEMI_URGENT' ? "Queue for Supportive Clinical Review" :
+                                                                    "Standard Routine Evaluation Queue"}
+                                                    </p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
                         </div>
                     </div>
                 </div>

@@ -20,6 +20,7 @@ os.makedirs(AUDIO_DIR, exist_ok=True)
 
 from starlette.concurrency import run_in_threadpool
 import asyncio
+import time
 
 async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, language: str):
     """Background task to run the AI pipeline with threadpool offloading"""
@@ -30,24 +31,31 @@ async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, languag
     try:
         await triage_service.update_triage_status(triage_id, "in_progress")
         
-        # 1. Pipeline execution in parallel threads as per prototype
+        pipeline_start = time.time()
+        print(f"\n[TIMER] Triage {triage_id}: Pipeline started.")
         print(f"DEBUG: Processing Triage {triage_id}. Offloading to threads.")
         
         # Parallel transcription and acoustic analysis
+        t_parallel_start = time.time()
         transcript_task = run_in_threadpool(ai_processor.transcribe, audio_bytes, language)
         anomaly_task = run_in_threadpool(ai_processor.detect_anomalies, audio_bytes)
         
         transcript, anomalies = await asyncio.gather(transcript_task, anomaly_task)
+        t_parallel_end = time.time()
+        print(f"[TIMER] Parallelized ASR + Acoustic Analysis: {t_parallel_end - t_parallel_start:.2f}s")
         
-        # 2. Reasoning step
+        # Reasoning step
         vitals_dict = None
         record = await triage_service.get_triage(triage_id)
         if record and record.vitals:
             vitals_dict = record.vitals.dict()
             
+        t_soap_start = time.time()
         analysis = await run_in_threadpool(ai_processor.generate_soap_note, transcript, anomalies, vitals_dict)
+        t_soap_end = time.time()
+        print(f"[TIMER] SOAP + Zone Prediction (MedGemma): {t_soap_end - t_soap_start:.2f}s")
         
-        # 3. Save results
+        # Save results
         record = await triage_service.get_triage(triage_id)
         if record:
             record.transcription = transcript
@@ -57,6 +65,17 @@ async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, languag
             record.triage_tier = analysis.get("triage_tier", "ROUTINE")
             record.status = "ready_for_review"
             await triage_service.update_triage_status(triage_id, "ready_for_review")
+            
+            total_elapsed = time.time() - pipeline_start
+            print(
+                f"\n[TIMER] ══════════════════════════════════════\n"
+                f"[TIMER]  TRIAGE PIPELINE COMPLETE\n"
+                f"[TIMER]  ASR + Acoustic  : {t_parallel_end - t_parallel_start:.2f}s\n"
+                f"[TIMER]  SOAP + Zone     : {t_soap_end - t_soap_start:.2f}s\n"
+                f"[TIMER]  TOTAL (End-to-End): {total_elapsed:.2f}s\n"
+                f"[TIMER]  Zone Assigned   : {record.triage_tier}\n"
+                f"[TIMER] ══════════════════════════════════════\n"
+            )
             print(f"[API DEBUG] Triage {triage_id} updated and ready. Specialty: {record.specialty}. Bucket: {record.triage_tier}")
             print(f"[API DEBUG] SOAP Subjective: {record.soap_note.subjective[:50]}...")
         else:

@@ -89,10 +89,32 @@ class EHRService:
         if start_idx != -1 and end_idx != -1:
             json_str = raw_text[start_idx:end_idx+1]
             fhir_bundle = json.loads(json_str)
+            # ── Patch all date/timestamp fields with the real current time ──
+            fhir_bundle = self._patch_fhir_timestamps(fhir_bundle)
             print(f"[EHR DEBUG] MedGemma successfully generated FHIR Bundle for {record.patient_id}")
             return fhir_bundle
         else:
             raise ValueError("No JSON found in MedGemma response")
+
+    def _patch_fhir_timestamps(self, obj: Any, now: Optional[str] = None) -> Any:
+        """
+        Recursively walks a FHIR bundle dict/list and replaces any
+        date, dateTime, effectiveDateTime, timestamp, issued, or authored fields
+        that look like hardcoded/hallucinated dates with the real UTC now.
+        """
+        if now is None:
+            now = datetime.utcnow().isoformat() + "Z"
+
+        DATE_KEYS = {"date", "dateTime", "effectiveDateTime", "timestamp", "issued", "authored", "start", "end"}
+
+        if isinstance(obj, dict):
+            return {
+                k: (now if k in DATE_KEYS and isinstance(v, str) else self._patch_fhir_timestamps(v, now))
+                for k, v in obj.items()
+            }
+        elif isinstance(obj, list):
+            return [self._patch_fhir_timestamps(item, now) for item in obj]
+        return obj
 
     def generate_fhir_bundle_deterministic(self, record: TriageRecord) -> Dict[str, Any]:
         """
