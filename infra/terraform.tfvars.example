@@ -1,0 +1,22 @@
+# ════════════════════════════════════════════════════════════════
+#  VaidyaSaarathi - terraform.tfvars (DEMO / AWS Environment)
+#
+#  Copy this file from terraform.tfvars.example and fill in
+#  your real values. DO NOT commit actual secrets to git.
+# ════════════════════════════════════════════════════════════════
+
+aws_region   = "ap-south-1"
+environment  = "demo"
+project      = "vaidyasaarathi"
+
+# MedGemma Model
+medgemma_model_id              = "alibayram/medgemma"
+medgemma_instance_type         = "ml.g4dn.xlarge"  # T4 GPU - best cost/perf for 7B
+medgemma_initial_instance_count = 1
+
+# TGI version matching your container image
+tgi_image_version = "1.4.2"
+
+# HuggingFace token (required for gated model access)
+# Get yours at: https://huggingface.co/settings/tokens
+hf_token = "YOUR_HF_TOKEN_HERE"
