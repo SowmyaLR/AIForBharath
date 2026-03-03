@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, status
-from services.patient_service import PatientService, Patient
+from services.patient_service import get_patient_service, Patient
 
 router = APIRouter(prefix="/patients", tags=["patients"])
-patient_service = PatientService()
+patient_service = get_patient_service()
 
 @router.get("/{hospital_id}", response_model=Patient)
 async def get_patient(hospital_id: str):

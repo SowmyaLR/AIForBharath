@@ -2,13 +2,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 
-type User = {
-    id: string;
-    hospital_id: string;
-    name: string;
-    role: string;
-    specialty?: string;
-};
+import { User } from '@/types';
 
 type AuthContextType = {
     user: User | null;

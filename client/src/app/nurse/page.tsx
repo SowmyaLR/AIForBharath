@@ -3,8 +3,9 @@ import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '@/components/AuthProvider';
 import { useRouter } from 'next/navigation';
 import { Mic, Square, Save, Activity, UploadCloud, Users, LogOut, Thermometer, Droplets, HeartPulse, Wind, AlertTriangle, Circle, Shield, Info } from 'lucide-react';
-import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
+import { triageRepository, patientRepository } from '@/repositories';
+import { TriageRecord } from '@/types';
 
 export default function NurseIntakePage() {
     const { user, token, logout, isLoading } = useAuth();
@@ -109,12 +110,8 @@ export default function NurseIntakePage() {
         formData.append('spo2', vitals.spo2.toString());
 
         try {
-            const res = await axios.post('http://localhost:8000/triage/', formData, {
-                headers: {
-                    'Content-Type': 'multipart/form-data',
-                }
-            });
-            const newTriageId = res.data.id;
+            const res = await triageRepository.createTriage(formData);
+            const newTriageId = res.id;
             setTriageId(newTriageId);
             setUploadStatus('success');
 
@@ -142,23 +139,21 @@ export default function NurseIntakePage() {
 
     const pollTriageStatus = async (id: string) => {
         setIsPolling(true);
-        const maxAttempts = 6; // 6 × 20s = 2 minutes total
+        const maxAttempts = 10;
         let attempts = 0;
 
         const interval = setInterval(async () => {
             try {
-                const res = await axios.get(`http://localhost:8000/triage/${id}`);
-                const currentStatus = res.data.status;
+                const record = await triageRepository.getTriage(id);
+                const currentStatus = record.status;
 
-                // Update uploadStatus to show current backend state in the button/loader if needed
                 if (currentStatus === 'in_progress') {
                     setUploadStatus('processing');
                 }
 
-                // Any terminal status should stop polling and show the result
                 const terminalStatuses = ['ready_for_review', 'finalized', 'exported'];
                 if (terminalStatuses.includes(currentStatus)) {
-                    setFinalZone(res.data.triage_tier || 'ROUTINE');
+                    setFinalZone(record.triage_tier || 'ROUTINE');
                     setIsPolling(false);
                     clearInterval(interval);
                     setUploadStatus('processed');
@@ -171,10 +166,9 @@ export default function NurseIntakePage() {
             if (attempts >= maxAttempts) {
                 setIsPolling(false);
                 clearInterval(interval);
-                // If we timeout, we might want to show a default or error
                 if (!finalZone) setUploadStatus('error');
             }
-        }, 20000); // Poll every 20 seconds
+        }, 15000); // Check every 15 seconds
     };
 
     const formatTime = (seconds: number) => {

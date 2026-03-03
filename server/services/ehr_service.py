@@ -7,6 +7,18 @@ from typing import Dict, Any, List, Optional
 from .triage_service import TriageRecord
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+APP_ENV = os.getenv("APP_ENV", "dev")
+SAGEMAKER_MEDGEMMA_ENDPOINT = os.getenv("SAGEMAKER_MEDGEMMA_ENDPOINT", "")
+
+if APP_ENV == "demo":
+    try:
+        import boto3
+        _sm_runtime = boto3.client("sagemaker-runtime", region_name=os.getenv("AWS_REGION", "ap-south-1"))
+        print(f"[EHR] DEMO mode: SageMaker FHIR generation active")
+    except ImportError:
+        _sm_runtime = None
+else:
+    _sm_runtime = None
 
 # In-memory store for exported FHIR records (for hackathon demo)
 EXPORTED_RECORDS: List[Dict[str, Any]] = []
@@ -66,21 +78,7 @@ class EHRService:
         Generate the FHIR R4 Bundle JSON now:
         """
 
-        response = requests.post(
-            f"{OLLAMA_HOST}/api/generate",
-            json={
-                "model": "alibayram/medgemma",
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "num_predict": 2048,
-                    "temperature": 0.1
-                }
-            }
-        )
-        response.raise_for_status()
-        result = response.json()
-        raw_text = result.get("response", "")
+        raw_text = self._call_inference_backend(prompt, max_tokens=2048)
         
         # Extract JSON from potential preamble
         start_idx = raw_text.find('{')
@@ -95,6 +93,37 @@ class EHRService:
             return fhir_bundle
         else:
             raise ValueError("No JSON found in MedGemma response")
+
+    def _call_inference_backend(self, prompt: str, max_tokens: int = 2048) -> str:
+        """Dispatch to SageMaker (demo) or Ollama (dev)."""
+        if APP_ENV == "demo" and _sm_runtime and SAGEMAKER_MEDGEMMA_ENDPOINT:
+            print(f"[EHR] Calling SageMaker for FHIR generation: {SAGEMAKER_MEDGEMMA_ENDPOINT}")
+            response = _sm_runtime.invoke_endpoint(
+                EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
+                ContentType="application/json",
+                Body=json.dumps({
+                    "inputs": prompt,
+                    "parameters": {"max_new_tokens": max_tokens, "temperature": 0.1}
+                })
+            )
+            result = json.loads(response["Body"].read().decode("utf-8"))
+            if isinstance(result, list) and result:
+                return result[0].get("generated_text", "")
+            return result.get("generated_text", str(result))
+        else:
+            print(f"[EHR] Calling Ollama for FHIR generation")
+            response = requests.post(
+                f"{OLLAMA_HOST}/api/generate",
+                json={
+                    "model": "alibayram/medgemma",
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"num_predict": max_tokens, "temperature": 0.1}
+                }
+            )
+            response.raise_for_status()
+            return response.json().get("response", "")
+
 
     def _patch_fhir_timestamps(self, obj: Any, now: Optional[str] = None) -> Any:
         """

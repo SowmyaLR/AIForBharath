@@ -1,7 +1,6 @@
-"use client";
-
+"use client"
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import { ehrRepository, EHRRecord } from '@/repositories/ehr-repository';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     FileText,
@@ -19,8 +18,8 @@ import {
 import Link from 'next/link';
 
 export default function EHRDashboard() {
-    const [records, setRecords] = useState<any[]>([]);
-    const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
+    const [records, setRecords] = useState<EHRRecord[]>([]);
+    const [selectedRecord, setSelectedRecord] = useState<EHRRecord | null>(null);
     const [isLoading, setIsLoading] = useState(true);
 
     useEffect(() => {
@@ -32,10 +31,10 @@ export default function EHRDashboard() {
     const fetchRecords = async () => {
         setIsLoading(true);
         try {
-            const res = await axios.get('http://localhost:8000/ehr/records');
-            setRecords(res.data);
-            if (res.data.length > 0 && !selectedRecord) {
-                setSelectedRecord(res.data[0]);
+            const data = await ehrRepository.getRecords();
+            setRecords(data);
+            if (data.length > 0 && !selectedRecord) {
+                setSelectedRecord(data[0]);
             }
         } catch (e) {
             console.error("Error fetching EHR records:", e);

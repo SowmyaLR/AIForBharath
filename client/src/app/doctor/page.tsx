@@ -4,15 +4,17 @@ import { useAuth } from '@/components/AuthProvider';
 import { useRouter } from 'next/navigation';
 import { Stethoscope, Activity, CheckCircle2, ShieldAlert, LogOut, Clock, BrainCircuit, HeartPulse, Database } from 'lucide-react';
 import Link from 'next/link';
-import axios from 'axios';
 import { motion } from 'framer-motion';
+import { triageRepository } from '@/repositories';
+import { TriageRecord, SOAPNote } from '@/types';
 
 export default function DoctorPage() {
     const { user, token, logout, isLoading } = useAuth();
     const router = useRouter();
-    const [queue, setQueue] = useState<any[]>([]);
-    const [selectedPatient, setSelectedPatient] = useState<any | null>(null);
-    const [editedSoap, setEditedSoap] = useState<any>(null);
+    const [queue, setQueue] = useState<TriageRecord[]>([]);
+    const [filterSpecialty, setFilterSpecialty] = useState<string>('All');
+    const [selectedPatient, setSelectedPatient] = useState<TriageRecord | null>(null);
+    const [editedSoap, setEditedSoap] = useState<SOAPNote | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     const [saveStatus, setSaveStatus] = useState<string>('');
 
@@ -22,33 +24,47 @@ export default function DoctorPage() {
         }
     }, [user, isLoading, router]);
 
+    useEffect(() => {
+        if (user) {
+            fetchQueue();
+            const interval = setInterval(fetchQueue, 30000);
+            return () => clearInterval(interval);
+        }
+    }, [user, filterSpecialty]);
+
     if (isLoading || !user || user.role !== 'doctor') {
         return null;
     }
 
-    useEffect(() => {
-        fetchQueue();
-        const interval = setInterval(fetchQueue, 15000);
-        return () => clearInterval(interval);
-    }, []);
-
-    const fetchQueue = async () => {
+    async function fetchQueue() {
+        if (!user) return;
         try {
-            const res = await axios.get('http://localhost:8000/triage/queue');
-            const filtered = res.data.filter((item: any) => item.status === 'ready_for_review' || item.status === 'finalized');
+            const records = await triageRepository.getQueue(filterSpecialty === 'All' ? undefined : filterSpecialty);
+            const filtered = records.filter(item => item.status === 'ready_for_review' || item.status === 'finalized' || item.status === 'exported');
             setQueue(filtered);
+
+            // Sync selected patient if it was updated in the background
+            if (selectedPatient) {
+                const updated = filtered.find(p => p.id === selectedPatient.id);
+                if (updated && JSON.stringify(updated.soap_note) !== JSON.stringify(selectedPatient.soap_note)) {
+                    setSelectedPatient(updated);
+                    if (!editedSoap || (editedSoap.subjective === '' && updated.soap_note)) {
+                        setEditedSoap(updated.soap_note ? { ...updated.soap_note } : { subjective: '', objective: '', assessment: '', plan: '' });
+                    }
+                }
+            }
         } catch (e) {
             console.error(e);
         }
-    };
+    }
 
-    const selectPatient = (patient: any) => {
+    const selectPatient = (patient: TriageRecord) => {
         setSelectedPatient(patient);
         setEditedSoap(patient.soap_note ? { ...patient.soap_note } : { subjective: '', objective: '', assessment: '', plan: '' });
         setSaveStatus('');
     };
 
-    const handleSoapChange = (section: string, value: string) => {
+    const handleSoapChange = (section: keyof SOAPNote, value: string) => {
         if (editedSoap) {
             setEditedSoap({ ...editedSoap, [section]: value });
             setSaveStatus('');
@@ -59,9 +75,8 @@ export default function DoctorPage() {
         if (!selectedPatient || !editedSoap) return;
         setIsSaving(true);
         try {
-            await axios.post(`http://localhost:8000/triage/${selectedPatient.id}/soap`, editedSoap);
+            await triageRepository.updateSoap(selectedPatient.id, editedSoap);
             setSaveStatus('Draft saved successfully');
-            // Update local state in queue if needed
             fetchQueue();
         } catch (e) {
             console.error(e);
@@ -72,12 +87,12 @@ export default function DoctorPage() {
     };
 
     const approveTriage = async () => {
-        if (!selectedPatient) return;
+        if (!selectedPatient || !editedSoap) return;
         try {
             // First save any unsaved changes
-            await axios.post(`http://localhost:8000/triage/${selectedPatient.id}/soap`, editedSoap);
+            await triageRepository.updateSoap(selectedPatient.id, editedSoap);
+            await triageRepository.finalize(selectedPatient.id);
 
-            await axios.post(`http://localhost:8000/triage/${selectedPatient.id}/finalize`);
             alert("Triage approved successfully. You can now move it to EHR.");
             setSelectedPatient({ ...selectedPatient, status: 'finalized' });
             fetchQueue();
@@ -90,8 +105,8 @@ export default function DoctorPage() {
     const moveToEhr = async () => {
         if (!selectedPatient) return;
         try {
-            await axios.post(`http://localhost:8000/triage/${selectedPatient.id}/export`);
-            alert("Record is being exported to FHIR format in the background. You can view it in the FHIR Viewer later.");
+            await triageRepository.exportToEhr(selectedPatient.id);
+            alert("Record is being exported to FHIR format in the background.");
             setSelectedPatient(null);
             fetchQueue();
         } catch (e) {
@@ -141,9 +156,25 @@ export default function DoctorPage() {
 
                     {/* Left Queue Panel */}
                     <div className="lg:col-span-4 flex flex-col h-[calc(100vh-140px)]">
-                        <div className="mb-4">
-                            <h2 className="text-2xl font-extrabold text-slate-900 tracking-tight">Triage Queue</h2>
-                            <p className="text-sm text-slate-500 flex items-center gap-1 mt-1"><Activity size={14} /> Auto-sorted by HAI-DEF AI Risk Score</p>
+                        <div className="mb-4 space-y-3">
+                            <div className="flex justify-between items-end">
+                                <div>
+                                    <h2 className="text-2xl font-extrabold text-slate-900 tracking-tight">Triage Queue</h2>
+                                    <p className="text-sm text-slate-500 flex items-center gap-1 mt-1"><Activity size={14} /> AI Risk Sorted Queue</p>
+                                </div>
+                                <select
+                                    value={filterSpecialty}
+                                    onChange={(e) => setFilterSpecialty(e.target.value)}
+                                    className="text-xs font-bold border rounded-lg px-2 py-1 bg-white outline-none focus:ring-2 focus:ring-primary/20"
+                                >
+                                    <option value="All">All Specialities</option>
+                                    <option value="General Medicine">General Medicine</option>
+                                    <option value="Cardiac">Cardiac</option>
+                                    <option value="ENT">ENT</option>
+                                    <option value="Pediatrics">Pediatrics</option>
+                                    <option value="Orthopedics">Orthopedics</option>
+                                </select>
+                            </div>
                         </div>
 
                         <div className="bg-white rounded-2xl shadow-xl border border-slate-100 flex-1 overflow-y-auto w-full p-3 space-y-3">
@@ -245,7 +276,7 @@ export default function DoctorPage() {
                                                     <textarea
                                                         className="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm text-slate-800 focus:bg-white focus:ring-2 focus:ring-primary/50 outline-none transition-all resize-none min-h-[100px]"
                                                         value={editedSoap[section as keyof typeof editedSoap] || ''}
-                                                        onChange={(e) => handleSoapChange(section, e.target.value)}
+                                                        onChange={(e) => handleSoapChange(section as keyof SOAPNote, e.target.value)}
                                                         readOnly={selectedPatient.status === 'finalized'}
                                                     />
                                                 </div>

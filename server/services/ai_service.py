@@ -78,7 +78,8 @@ class AudioProcessor:
         print("Loading HeAR model (HuggingFace)...")
         try:
             # Download full repo and load as SavedModel
-            model_dir = snapshot_download("google/hear")
+            hf_token = os.getenv("HF_TOKEN")
+            model_dir = snapshot_download("google/hear", token=hf_token)
             model = tf.saved_model.load(model_dir)
             self.hear_serving_signature = model.signatures['serving_default']
             print("HeAR model loaded successfully!")

@@ -4,7 +4,7 @@ import { useAuth } from '@/components/AuthProvider';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { ShieldAlert, Activity, HeartPulse } from 'lucide-react';
-import axios from 'axios';
+import { authRepository } from '@/repositories';
 
 export default function LoginPage() {
     const [hospitalId, setHospitalId] = useState('');
@@ -20,12 +20,7 @@ export default function LoginPage() {
         setError('');
 
         try {
-            const response = await axios.post('http://localhost:8000/auth/login', {
-                hospital_id: hospitalId,
-                password: password
-            });
-
-            const { token, user } = response.data;
+            const { token, user } = await authRepository.login(hospitalId, password);
             login(token, user);
 
             // Redirect based on role

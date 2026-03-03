@@ -71,3 +71,98 @@ resource "aws_s3_bucket_public_access_block" "artifacts" {
 }
 
 data "aws_caller_identity" "current" {}
+
+# ── ECS Task Execution Role (for FastAPI server in demo mode) ────────────────
+
+data "aws_iam_policy_document" "ecs_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ecs_task" {
+  name               = "${local.name_prefix}-ecs-task-role"
+  assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_ecr" {
+  role       = aws_iam_role.ecs_task.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_cw" {
+  role       = aws_iam_role.ecs_task.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+}
+
+# Scoped S3 policy — audio bucket only
+resource "aws_iam_role_policy" "ecs_task_s3_audio" {
+  name = "s3-audio-access"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+        Resource = "${aws_s3_bucket.audio.arn}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.audio.arn
+      }
+    ]
+  })
+}
+
+# Scoped DynamoDB policy — triage + patients tables only
+resource "aws_iam_role_policy" "ecs_task_dynamodb" {
+  name = "dynamodb-access"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ]
+        Resource = [
+          aws_dynamodb_table.triage.arn,
+          "${aws_dynamodb_table.triage.arn}/index/*",
+          aws_dynamodb_table.patients.arn
+        ]
+      }
+    ]
+  })
+}
+
+# Allow ECS task to invoke SageMaker endpoint (for SOAP generation)
+resource "aws_iam_role_policy" "ecs_task_sagemaker" {
+  name = "sagemaker-invoke"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["sagemaker:InvokeEndpoint"]
+        Resource = aws_sagemaker_endpoint.medgemma.arn
+      }
+    ]
+  })
+}
+

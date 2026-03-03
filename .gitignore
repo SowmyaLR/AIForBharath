@@ -211,3 +211,4 @@ server/storage
 storage/
 .env.demo
 .env.dev
+newvenv

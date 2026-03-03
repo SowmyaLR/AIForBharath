@@ -1,26 +1,50 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
 from typing import Optional, List
 import datetime
-from services.triage_service import TriageService, TriageRecord, VitalSigns, SOAPNote
-from services.ai_service import AudioProcessor, AIServiceError
 import os
+from services.triage_service import get_triage_service, TriageRecord, VitalSigns, SOAPNote
+from services.ai_service import AudioProcessor, AIServiceError
+
+APP_ENV = os.getenv("APP_ENV", "dev")
+AUDIO_BUCKET = os.getenv("AUDIO_S3_BUCKET", "")
+AUDIO_DIR = "storage/audio"
+os.makedirs(AUDIO_DIR, exist_ok=True)
 
 router = APIRouter(prefix="/triage", tags=["triage"])
-triage_service = TriageService()
+triage_service = get_triage_service()
 
-# In production initialize conditionally or lazily to avoid startup blocking
+# Initialize AI processor at startup
 try:
     ai_processor = AudioProcessor()
 except Exception as e:
     print(f"Warning: Failed to init AudioProcessor: {e}")
     ai_processor = None
 
-AUDIO_DIR = "storage/audio"
-os.makedirs(AUDIO_DIR, exist_ok=True)
-
 from starlette.concurrency import run_in_threadpool
 import asyncio
 import time
+
+
+def upload_audio(audio_bytes: bytes, filename: str) -> str:
+    """Upload audio to S3 (demo) or save locally (dev). Returns the file URI/path."""
+    if APP_ENV == "demo" and AUDIO_BUCKET:
+        try:
+            import boto3
+            region = os.getenv("AWS_REGION", "ap-south-1")
+            s3 = boto3.client("s3", region_name=region)
+            s3_key = f"triage-audio/{filename}"
+            s3.put_object(Bucket=AUDIO_BUCKET, Key=s3_key, Body=audio_bytes)
+            uri = f"s3://{AUDIO_BUCKET}/{s3_key}"
+            print(f"[DEMO] Audio uploaded to S3: {uri}")
+            return uri
+        except Exception as e:
+            print(f"[WARNING] S3 upload failed, falling back to local: {e}")
+    # Dev mode / S3 fallback
+    file_path = f"{AUDIO_DIR}/{filename}"
+    with open(file_path, "wb") as f:
+        f.write(audio_bytes)
+    return file_path
+
 
 async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, language: str):
     """Background task to run the AI pipeline with threadpool offloading"""
@@ -112,15 +136,13 @@ async def create_triage(
             respiratory_rate=rr or 0,
             oxygen_saturation=spo2 or 0,
             recorded_at=datetime.datetime.utcnow(),
-            recorded_by="Nurse_Intake_01" # Mock
+            recorded_by="Nurse_Intake_01"
         )
 
-    # Save file locally (Encrypted in prod)
-    file_path = f"{AUDIO_DIR}/{audio.filename}"
-    with open(file_path, "wb") as f:
-        f.write(audio_bytes)
+    # Save audio: S3 in demo mode, local disk in dev mode
+    audio_uri = upload_audio(audio_bytes, audio.filename)
     
-    record = await triage_service.create_triage_record(patient_id, file_path, language, vitals)
+    record = await triage_service.create_triage_record(patient_id, audio_uri, language, vitals)
     
     # Process asynchronously
     background_tasks.add_task(_process_triage_audio_task, record.id, audio_bytes, language)
