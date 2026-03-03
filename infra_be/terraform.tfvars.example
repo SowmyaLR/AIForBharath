@@ -1,0 +1,20 @@
+# Environment Configuration
+aws_region                  = "ap-south-1"
+environment                 = "demo"
+project                     = "vaidyasaarathi"
+
+# Backend EC2 Instance Type
+# For lightweight demo without large local models: m5.2xlarge
+# For faster processing with local Whisper/HeAR: g4dn.xlarge
+instance_type               = "g4dn.xlarge"
+
+# SSH Key (Optional but highly recommended)
+# Create a key pair in AWS EC2 Console and set the name here
+key_name                    = ""
+
+# Secrets & Connections
+# The Hugging Face token to pull any gated models
+hf_token                    = "YOUR_HF_TOKEN"
+
+# The name of the SageMaker MedGemma endpoint deployed by the 'infra' folder
+sagemaker_medgemma_endpoint = "YOUR_SAGEMAKER_ENDPOINT_NAME"

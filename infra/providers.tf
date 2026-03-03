@@ -4,7 +4,7 @@
 # ════════════════════════════════════════════
 
 terraform {
-  required_version = ">= 1.7.0"
+  required_version = ">= 1.5.0"
 
   required_providers {
     aws = {
@@ -34,9 +34,7 @@ provider "aws" {
 }
 
 locals {
-  name_prefix = "${var.project}-${var.environment}"
+  name_prefix = "${var.project}-${var.environment}-v2"
   
-  # HuggingFace TGI Deep Learning Container image for ap-south-1
-  # See: https://github.com/aws/deep-learning-containers/blob/master/available_images.md
-  tgi_image_uri = "763104351884.dkr.ecr.${var.aws_region}.amazonaws.com/huggingface-pytorch-tgi-inference:2.1.1-tgi${var.tgi_image_version}-gpu-py310-cu121-ubuntu22.04"
+  tgi_image_uri = "763104351884.dkr.ecr.${var.aws_region}.amazonaws.com/huggingface-pytorch-tgi-inference:2.7.0-tgi3.3.6-gpu-py311-cu124-ubuntu22.04"
 }

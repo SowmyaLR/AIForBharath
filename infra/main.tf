@@ -13,15 +13,12 @@ resource "aws_sagemaker_model" "medgemma" {
     image = local.tgi_image_uri
 
     environment = {
-      # HuggingFace TGI environment variables
+      # HuggingFace standard Inference Container variables
       HF_MODEL_ID                = var.medgemma_model_id
       HF_TOKEN                   = var.hf_token
       SM_NUM_GPUS                = "1"
-      MAX_INPUT_LENGTH           = "4096"
-      MAX_TOTAL_TOKENS           = "4608"   # input + output
-      MAX_BATCH_PREFILL_TOKENS   = "4096"
-      # JSON output
-      MESSAGES_API_ENABLED       = "true"
+      MAX_INPUT_LENGTH           = "3072"
+      MAX_TOTAL_TOKENS           = "4096"
     }
   }
 
@@ -40,6 +37,7 @@ resource "aws_sagemaker_endpoint_configuration" "medgemma" {
     model_name             = aws_sagemaker_model.medgemma.name
     instance_type          = var.medgemma_instance_type
     initial_instance_count = var.medgemma_initial_instance_count
+    container_startup_health_check_timeout_in_seconds = 600
 
     # Enable model data capture (for monitoring / audit)
     # Uncomment in production:
@@ -107,7 +105,7 @@ resource "aws_cloudwatch_metric_alarm" "endpoint_latency_high" {
   metric_name         = "ModelLatency"
   namespace           = "AWS/SageMaker"
   period              = 60
-  statistic           = "p90"
+  extended_statistic  = "p90"
   threshold           = 10000  # 10s P90 latency threshold (microseconds → ms)
   alarm_description   = "MedGemma P90 latency exceeds 10 seconds"
 
