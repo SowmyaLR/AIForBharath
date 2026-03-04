@@ -10,7 +10,6 @@ numpy
 scipy
 python-jose[cryptography]
 bcrypt<4.0.0
-python-multipart
 passlib
 faster-whisper
 tensorflow
@@ -18,3 +17,4 @@ huggingface_hub
 scikit-learn
 requests
 boto3
+python-dotenv

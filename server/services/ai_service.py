@@ -403,36 +403,42 @@ class AudioProcessor:
     def _call_inference_backend(self, prompt: str) -> str:
         """
         Dispatches to the correct AI backend based on APP_ENV.
-        DEV  → Ollama (local)
-        DEMO → AWS SageMaker Real-Time Inference
+        DEMO → AWS SageMaker (Optimized with Gemma Chat Templates)
+        DEV  → Ollama (Local)
         """
         if APP_ENV == "demo" and _sm_runtime and SAGEMAKER_MEDGEMMA_ENDPOINT:
             print(f"[ENV] Calling SageMaker endpoint: {SAGEMAKER_MEDGEMMA_ENDPOINT}")
+            
+            # Use Gemma Chat Template for instruction adherence
+            formatted_prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+            
             response = _sm_runtime.invoke_endpoint(
                 EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
                 ContentType="application/json",
                 Body=json.dumps({
-                    "inputs": prompt, 
+                    "inputs": formatted_prompt, 
                     "parameters": {
-                        "max_new_tokens": 1024, 
-                        "temperature": 0.1
+                        "max_new_tokens": 512, 
+                        "temperature": 0.2,
+                        "top_p": 0.95,
+                        "do_sample": True,
+                        "stop": ["<end_of_turn>", "<eos>"]
                     }
                 })
             )
             result = json.loads(response["Body"].read().decode("utf-8"))
-            # SageMaker HuggingFace TGI schema: [{"generated_text": "..."}]
             if isinstance(result, list) and result:
                 return result[0].get("generated_text", "")
             return result.get("generated_text", str(result))
         else:
-            # Default: Ollama
+            # Ollama handles templating automatically via its Modelfile
             response = requests.post(
                 f"{OLLAMA_HOST}/api/generate",
                 json={
                     "model": "alibayram/medgemma",
                     "prompt": prompt,
                     "stream": False,
-                    "options": {"num_predict": 1024, "temperature": 0.1, "num_thread": 4}
+                    "options": {"num_predict": 1024, "temperature": 0.1}
                 }
             )
             response.raise_for_status()

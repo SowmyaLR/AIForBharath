@@ -55,7 +55,7 @@ resource "aws_ecr_lifecycle_policy" "api" {
 
 resource "aws_security_group" "alb" {
   name        = "${local.name_prefix}-alb-sg"
-  description = "ALB — allow inbound HTTP/HTTPS from internet"
+  description = "ALB - allow inbound HTTP/HTTPS from internet"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -81,7 +81,7 @@ resource "aws_security_group" "alb" {
 
 resource "aws_security_group" "ecs_tasks" {
   name        = "${local.name_prefix}-ecs-tasks-sg"
-  description = "ECS tasks — allow inbound from ALB only"
+  description = "ECS tasks - allow inbound from ALB only"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -183,6 +183,11 @@ resource "aws_ecs_task_definition" "api" {
   memory                   = "8192" # 8 GB — Whisper ~1.5GB + HeAR ~2GB + app overhead
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
 
   container_definitions = jsonencode([
     {

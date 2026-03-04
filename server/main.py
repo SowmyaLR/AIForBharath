@@ -1,15 +1,29 @@
-from dotenv import load_dotenv
-load_dotenv()  # loads server/.env before any os.getenv() calls
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # loads server/.env before any os.getenv() calls
+except ImportError:
+    pass
+
+import os
+import json
+import logging
+import sys
+import boto3
+from botocore.exceptions import ClientError
+
+# ── Global Logging Configuration ─────────────────────────────────────────────
+# This ensures that logger.info() statements are captured in CloudWatch.
+# Default Python logging level is WARNING; we must explicitly set it to INFO.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from api import auth, patients, triage, ehr
-import os
-import json
-import logging
-import boto3
-from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 

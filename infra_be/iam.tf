@@ -95,7 +95,8 @@ resource "aws_iam_role_policy" "ecs_task_dynamodb" {
         "dynamodb:UpdateItem",
         "dynamodb:DeleteItem",
         "dynamodb:Query",
-        "dynamodb:Scan" # kept for dev fallback; remove post-demo
+        "dynamodb:Scan",
+        "dynamodb:DescribeTable"
       ]
       Resource = [
         data.terraform_remote_state.storage.outputs.triage_table_arn,
