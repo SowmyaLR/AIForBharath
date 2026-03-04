@@ -1,26 +1,36 @@
 import os
 import requests
 import json
+import logging
 from datetime import datetime
 import uuid
 from typing import Dict, Any, List, Optional
 from .triage_service import TriageRecord
 
+logger = logging.getLogger(__name__)
+
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 APP_ENV = os.getenv("APP_ENV", "dev")
+AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 SAGEMAKER_MEDGEMMA_ENDPOINT = os.getenv("SAGEMAKER_MEDGEMMA_ENDPOINT", "")
+FHIR_S3_BUCKET = os.getenv("FHIR_S3_BUCKET", "")
 
 if APP_ENV == "demo":
     try:
         import boto3
-        _sm_runtime = boto3.client("sagemaker-runtime", region_name=os.getenv("AWS_REGION", "ap-south-1"))
-        print(f"[EHR] DEMO mode: SageMaker FHIR generation active")
+        from botocore.config import Config
+        _sm_config = Config(read_timeout=60, connect_timeout=5, retries={"max_attempts": 2})
+        _sm_runtime = boto3.client("sagemaker-runtime", region_name=AWS_REGION, config=_sm_config)
+        _s3 = boto3.client("s3", region_name=AWS_REGION)
+        logger.info(json.dumps({"event": "ehr_demo_mode_init", "endpoint": SAGEMAKER_MEDGEMMA_ENDPOINT}))
     except ImportError:
         _sm_runtime = None
+        _s3 = None
 else:
     _sm_runtime = None
+    _s3 = None
 
-# In-memory store for exported FHIR records (for hackathon demo)
+# In-memory fallback for dev mode
 EXPORTED_RECORDS: List[Dict[str, Any]] = []
 
 class EHRService:
@@ -28,7 +38,17 @@ class EHRService:
         pass
 
     async def get_exported_records(self) -> List[Dict[str, Any]]:
-        """Returns all exported FHIR records for the dashboard"""
+        """Returns all exported FHIR records. In demo mode, reads from S3."""
+        if APP_ENV == "demo" and _s3 and FHIR_S3_BUCKET:
+            try:
+                resp = _s3.list_objects_v2(Bucket=FHIR_S3_BUCKET, Prefix="bundles/")
+                records = []
+                for obj in resp.get("Contents", []):
+                    body = _s3.get_object(Bucket=FHIR_S3_BUCKET, Key=obj["Key"])
+                    records.append(json.loads(body["Body"].read()))
+                return records
+            except Exception as e:
+                logger.warning(json.dumps({"event": "fhir_s3_list_failed", "error": str(e)}))
         return EXPORTED_RECORDS
 
     async def generate_fhir_bundle(self, record: TriageRecord) -> Dict[str, Any]:
@@ -43,12 +63,20 @@ class EHRService:
             return self.generate_fhir_bundle_deterministic(record)
 
     async def generate_fhir_with_medgemma(self, record: TriageRecord) -> Dict[str, Any]:
-        """Uses MedGemma via Ollama to generate a rich FHIR R4 Bundle"""
+        """Uses MedGemma via SageMaker/Ollama to generate a rich FHIR R4 Bundle"""
         print(f"[EHR DEBUG] Requesting MedGemma for FHIR R4 generation (Patient: {record.patient_id})...")
         
-        vitals_str = ""
+        vitals_list = []
         if record.vitals:
-            vitals_str = f"Temp: {record.vitals.temperature}, BP: {record.vitals.blood_pressure_systolic}/{record.vitals.blood_pressure_diastolic}, HR: {record.vitals.heart_rate}, SpO2: {record.vitals.oxygen_saturation}, RR: {record.vitals.respiratory_rate}"
+            v = record.vitals
+            vitals_list.append(f"Temperature: {v.temperature}C")
+            vitals_list.append(f"BP: {v.blood_pressure_systolic}/{v.blood_pressure_diastolic}")
+            vitals_list.append(f"Heart Rate: {v.heart_rate} bpm")
+            vitals_list.append(f"SpO2: {v.oxygen_saturation}%")
+            vitals_list.append(f"Resp Rate: {v.respiratory_rate} bpm")
+        
+        age_info = f"Age: {record.patient_age}" if record.patient_age else "Age: Not provided"
+        vitals_str = "\n".join(vitals_list) if vitals_list else "Not provided"
 
         soap_str = "No SOAP note available"
         if record.soap_note:
@@ -60,6 +88,7 @@ class EHRService:
         
         INPUT DATA:
         - Hospital ID: {record.patient_id}
+        - Patient {age_info}
         - Clinical SOAP Note:
         {soap_str}
         - Patient Vitals:
@@ -78,21 +107,65 @@ class EHRService:
         Generate the FHIR R4 Bundle JSON now:
         """
 
-        raw_text = self._call_inference_backend(prompt, max_tokens=2048)
+        from fastapi.concurrency import run_in_threadpool
+        raw_text = await run_in_threadpool(self._call_inference_backend, prompt, 2048)
         
-        # Extract JSON from potential preamble
-        start_idx = raw_text.find('{')
-        end_idx = raw_text.rfind('}')
-        
-        if start_idx != -1 and end_idx != -1:
-            json_str = raw_text[start_idx:end_idx+1]
-            fhir_bundle = json.loads(json_str)
+        try:
+            fhir_bundle = self._extract_json_robust(raw_text)
             # ── Patch all date/timestamp fields with the real current time ──
             fhir_bundle = self._patch_fhir_timestamps(fhir_bundle)
             print(f"[EHR DEBUG] MedGemma successfully generated FHIR Bundle for {record.patient_id}")
             return fhir_bundle
-        else:
-            raise ValueError("No JSON found in MedGemma response")
+        except Exception as e:
+            print(f"[EHR WARNING] MedGemma FHIR extraction failed: {e}. Falling back to deterministic generator.")
+            return self.generate_fhir_bundle_deterministic(record)
+
+    def _extract_json_robust(self, text: str) -> Dict[str, Any]:
+        """Robustly extracts the first valid JSON object from LLM output."""
+        if not text:
+            raise ValueError("Empty response from AI")
+
+        # 1. Try pure parse first
+        text = text.strip()
+        try:
+            return json.loads(text)
+        except:
+            pass
+
+        # 2. Extract content starting from first '{'
+        # Clean control characters (except tab/newline)
+        text = "".join(ch for ch in text if ch >= ' ' or ch in '\n\r\t')
+        
+        start_idx = text.find('{')
+        if start_idx == -1:
+            raise ValueError("No JSON object starting character '{' found in response")
+
+        # Find all potential closing braces
+        end_indices = [i for i, ch in enumerate(text) if ch == '}']
+        if not end_indices:
+            raise ValueError("No JSON object closing character '}' found in response")
+
+        # 3. Strategy: Try candidates from the absolute last '}' back to the first '{'
+        # This handles models that append garbage/redundant braces at the end.
+        for end_idx in reversed(end_indices):
+            if end_idx <= start_idx:
+                break
+            
+            candidate = text[start_idx:end_idx+1]
+            try:
+                # Basic cleaning of markdown fences inside the block
+                clean_candidate = candidate.replace("```json", "").replace("```", "").strip()
+                return json.loads(clean_candidate)
+            except json.JSONDecodeError:
+                continue
+
+        # 4. If nothing parsed, reveal why the largest block failed
+        try:
+            largest = text[start_idx:end_indices[-1]+1]
+            return json.loads(largest)
+        except json.JSONDecodeError as e:
+            print(f"[EHR DEBUG] FHIR JSON final parse attempt failed: line {e.lineno}, col {e.colno}: {e.msg}")
+            raise ValueError(f"JSON parsing failed: {str(e)}")
 
     def _call_inference_backend(self, prompt: str, max_tokens: int = 2048) -> str:
         """Dispatch to SageMaker (demo) or Ollama (dev)."""
@@ -228,20 +301,43 @@ class EHRService:
 
     async def export_to_ehr(self, record: TriageRecord) -> bool:
         """
-        Mock EHR Export Implementation.
+        Generates a FHIR R4 bundle and persists it.
+        - Demo mode: writes to S3 fhir/bundles/{patient_id}/{uuid}.json (survives ECS restarts)
+        - Dev mode: appends to in-memory list
         """
         fhir_data = await self.generate_fhir_bundle(record)
-        
-        # Store for the hackathon dashboard
-        EXPORTED_RECORDS.append({
+        bundle_id = str(uuid.uuid4())
+        export_entry = {
             "patient_id": record.patient_id,
             "exported_at": datetime.utcnow().isoformat() + "Z",
             "fhir_bundle": fhir_data
-        })
-        
-        print(f"[EHR DEBUG] Exported FHIR Bundle for Patient {record.patient_id} to internal repository.")
-        print(f"[EHR DEBUG] Total records in repository: {len(EXPORTED_RECORDS)}")
-        
+        }
+
+        if APP_ENV == "demo" and _s3 and FHIR_S3_BUCKET:
+            try:
+                s3_key = f"bundles/{record.patient_id}/{bundle_id}.json"
+                _s3.put_object(
+                    Bucket=FHIR_S3_BUCKET,
+                    Key=s3_key,
+                    Body=json.dumps(export_entry),
+                    ContentType="application/json"
+                )
+                logger.info(json.dumps({
+                    "event": "fhir_exported_s3",
+                    "patient_id": record.patient_id,
+                    "s3_key": s3_key
+                }))
+            except Exception as e:
+                logger.warning(json.dumps({"event": "fhir_s3_write_failed_fallback_memory", "error": str(e)}))
+                EXPORTED_RECORDS.append(export_entry)
+        else:
+            EXPORTED_RECORDS.append(export_entry)
+            logger.info(json.dumps({
+                "event": "fhir_exported_memory",
+                "patient_id": record.patient_id,
+                "total_in_memory": len(EXPORTED_RECORDS)
+            }))
+
         return True
 
 ehr_service = EHRService()

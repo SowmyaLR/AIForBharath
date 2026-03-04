@@ -1,3 +1,7 @@
+# ══════════════════════════════════════════════════════════════
+#  VaidyaSaarathi — Backend Provider Config (ECS Fargate)
+# ══════════════════════════════════════════════════════════════
+
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
@@ -10,11 +14,17 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
+
   default_tags {
     tags = {
       Project     = var.project
       Environment = var.environment
       ManagedBy   = "terraform"
+      Module      = "be"
     }
   }
+}
+
+locals {
+  name_prefix = "${var.project}-${var.environment}-v2"
 }

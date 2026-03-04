@@ -2,10 +2,11 @@ import { apiClient } from '../api/api-client';
 import { TriageRecord, SOAPNote, VitalSigns } from '../types';
 
 export const triageRepository = {
-    createTriage: async (formData: FormData): Promise<TriageRecord> => {
+    createTriage: async (formData: FormData, idempotencyKey?: string): Promise<TriageRecord> => {
         const response = await apiClient.post<TriageRecord>('/triage/', formData, {
             headers: {
                 'Content-Type': 'multipart/form-data',
+                ...(idempotencyKey ? { 'X-Idempotency-Key': idempotencyKey } : {}),
             },
         });
         return response.data;
@@ -43,3 +44,4 @@ export const triageRepository = {
         return response.data;
     }
 };
+

@@ -27,7 +27,7 @@ export default function DoctorPage() {
     useEffect(() => {
         if (user) {
             fetchQueue();
-            const interval = setInterval(fetchQueue, 30000);
+            const interval = setInterval(fetchQueue, 10000); // 10s — faster for demo
             return () => clearInterval(interval);
         }
     }, [user, filterSpecialty]);
@@ -195,7 +195,7 @@ export default function DoctorPage() {
                                     `}
                                         >
                                             <div className="flex justify-between items-start mb-2">
-                                                <h3 className="font-bold text-slate-900">Patient: {pt.patient_id}</h3>
+                                                <h3 className="font-bold text-slate-900">Patient: {pt.patient_id} <span className="text-slate-400 font-normal ml-1">({pt.patient_age || 'N/A'})</span></h3>
                                                 <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border uppercase tracking-wider ${getRiskColor(pt.triage_tier)}`}>
                                                     {pt.triage_tier || 'Routine'}
                                                 </span>
@@ -221,6 +221,7 @@ export default function DoctorPage() {
                                     <div>
                                         <h2 className="text-xl font-bold flex items-center gap-2">
                                             {selectedPatient.patient_id}
+                                            <span className="text-slate-400 font-medium ml-1">({selectedPatient.patient_age || 'N/A'} yrs)</span>
                                             {selectedPatient.status === 'finalized' && <span className="bg-green-500/20 text-green-300 border border-green-500/50 text-xs px-2 py-0.5 rounded ml-2">Finalized</span>}
                                         </h2>
                                         <p className="text-slate-400 text-sm flex items-center gap-1 mt-1">
@@ -249,6 +250,7 @@ export default function DoctorPage() {
                                             <h4 className="text-xs font-bold text-amber-800 uppercase tracking-wider mb-2 flex items-center gap-2"><HeartPulse size={14} /> Nurse Vitals</h4>
                                             {selectedPatient.vitals ? (
                                                 <div className="grid grid-cols-3 gap-2 text-sm">
+                                                    <div><span className="text-slate-500">Age:</span> <span className="font-semibold">{selectedPatient.patient_age || 'N/A'}</span></div>
                                                     <div><span className="text-slate-500">BP:</span> <span className="font-semibold">{selectedPatient.vitals.blood_pressure_systolic}/{selectedPatient.vitals.blood_pressure_diastolic}</span></div>
                                                     <div><span className="text-slate-500">HR:</span> <span className="font-semibold">{selectedPatient.vitals.heart_rate}</span></div>
                                                     <div><span className="text-slate-500">Temp:</span> <span className="font-semibold">{selectedPatient.vitals.temperature}°C</span></div>

@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '@/components/AuthProvider';
 import { useRouter } from 'next/navigation';
-import { Mic, Square, Save, Activity, UploadCloud, Users, LogOut, Thermometer, Droplets, HeartPulse, Wind, AlertTriangle, Circle, Shield, Info } from 'lucide-react';
+import { Mic, Square, Save, Activity, UploadCloud, Users, LogOut, Thermometer, Droplets, HeartPulse, Wind, AlertTriangle, Circle, Shield, Info, XCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { triageRepository, patientRepository } from '@/repositories';
 import { TriageRecord } from '@/types';
@@ -19,7 +19,8 @@ export default function NurseIntakePage() {
         bp_dia: 80,
         hr: 75,
         rr: 16,
-        spo2: 98
+        spo2: 98,
+        age: 30
     });
 
     const [isRecording, setIsRecording] = useState(false);
@@ -28,11 +29,16 @@ export default function NurseIntakePage() {
     const [recordingTime, setRecordingTime] = useState(0);
     const [triageId, setTriageId] = useState<string | null>(null);
     const [finalZone, setFinalZone] = useState<string | null>(null);
+    const [preliminaryZone, setPreliminaryZone] = useState<string | null>(null);
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [isPolling, setIsPolling] = useState(false);
 
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const chunksRef = useRef<Blob[]>([]);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+    // Idempotency key — generated once per component mount, regenerated after each submission
+    const idempotencyKeyRef = useRef<string>(crypto.randomUUID());
 
     useEffect(() => {
         if (!isLoading && (!user || user.role !== 'nurse')) {
@@ -58,7 +64,11 @@ export default function NurseIntakePage() {
                 return;
             }
             setFinalZone(null);
+            setPreliminaryZone(null);
+            setErrorMessage(null);
             setTriageId(null);
+            // Regenerate idempotency key for each new recording
+            idempotencyKeyRef.current = crypto.randomUUID();
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
 
@@ -108,14 +118,15 @@ export default function NurseIntakePage() {
         formData.append('hr', vitals.hr.toString());
         formData.append('rr', vitals.rr.toString());
         formData.append('spo2', vitals.spo2.toString());
+        formData.append('patient_age', vitals.age.toString());
 
         try {
-            const res = await triageRepository.createTriage(formData);
+            const res = await triageRepository.createTriage(formData, idempotencyKeyRef.current);
             const newTriageId = res.id;
             setTriageId(newTriageId);
             setUploadStatus('success');
 
-            // Start polling for the zone
+            // Start polling at 2s intervals
             pollTriageStatus(newTriageId);
 
             setTimeout(() => {
@@ -128,7 +139,8 @@ export default function NurseIntakePage() {
                     bp_dia: 80,
                     hr: 75,
                     rr: 16,
-                    spo2: 98
+                    spo2: 98,
+                    age: 30
                 });
             }, 3000);
         } catch (err) {
@@ -139,7 +151,7 @@ export default function NurseIntakePage() {
 
     const pollTriageStatus = async (id: string) => {
         setIsPolling(true);
-        const maxAttempts = 10;
+        const maxAttempts = 150; // 5 min at 2s intervals
         let attempts = 0;
 
         const interval = setInterval(async () => {
@@ -151,9 +163,26 @@ export default function NurseIntakePage() {
                     setUploadStatus('processing');
                 }
 
+                // Show preliminary vitals-only zone mid-poll if available
+                if (record.preliminary_zone && !finalZone) {
+                    setPreliminaryZone(record.preliminary_zone);
+                }
+
+                // Failure: show error message, stop polling
+                if (currentStatus === 'failed') {
+                    const errorMsg = record.soap_note?.subjective ||
+                        'AI analysis could not be completed. Your recording and vitals are saved.';
+                    setErrorMessage(errorMsg);
+                    setIsPolling(false);
+                    clearInterval(interval);
+                    setUploadStatus('error');
+                    return;
+                }
+
                 const terminalStatuses = ['ready_for_review', 'finalized', 'exported'];
                 if (terminalStatuses.includes(currentStatus)) {
                     setFinalZone(record.triage_tier || 'ROUTINE');
+                    setPreliminaryZone(null); // Clear fallback once final zone is set
                     setIsPolling(false);
                     clearInterval(interval);
                     setUploadStatus('processed');
@@ -166,9 +195,12 @@ export default function NurseIntakePage() {
             if (attempts >= maxAttempts) {
                 setIsPolling(false);
                 clearInterval(interval);
-                if (!finalZone) setUploadStatus('error');
+                if (!finalZone) {
+                    setErrorMessage('Analysis is taking longer than expected. Please check back in the queue.');
+                    setUploadStatus('error');
+                }
             }
-        }, 15000); // Check every 15 seconds
+        }, 2000); // Poll every 2 seconds
     };
 
     const formatTime = (seconds: number) => {
@@ -216,15 +248,26 @@ export default function NurseIntakePage() {
                             </h3>
 
                             <div className="space-y-6">
-                                <div className="grid grid-cols-2 gap-4">
+                                <div className="grid grid-cols-3 gap-4">
                                     <div>
-                                        <label className="block text-sm font-medium text-slate-700 mb-1">Patient ID / QR</label>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Patient ID</label>
                                         <input
                                             type="text"
                                             value={patientId}
                                             onChange={(e) => setPatientId(e.target.value)}
                                             className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
                                             placeholder="P-001"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-1">Age</label>
+                                        <input
+                                            type="number"
+                                            name="age"
+                                            value={vitals.age}
+                                            onChange={handleVitalsChange}
+                                            className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"
+                                            placeholder="30"
                                         />
                                     </div>
                                     <div>
@@ -369,7 +412,7 @@ export default function NurseIntakePage() {
                                             </div>
 
                                             {isPolling ? (
-                                                <div className="flex flex-col items-center py-4">
+                                                <div className="flex flex-col items-center py-4 w-full">
                                                     <Activity className="text-teal-500 animate-spin mb-3" size={32} />
                                                     <p className="text-sm font-bold text-slate-600">AI Reasoning in progress...</p>
                                                     <p className="text-[11px] text-slate-400">
@@ -377,8 +420,30 @@ export default function NurseIntakePage() {
                                                             {uploadStatus === 'processing' ? 'Processing Model' : 'In Queue'}
                                                         </span>
                                                     </p>
+                                                    {/* Preliminary vitals-only zone — shown while MedGemma is still running */}
+                                                    {preliminaryZone && (
+                                                        <div className="mt-4 px-4 py-2 rounded-xl bg-amber-50 border border-amber-200 text-center w-full">
+                                                            <p className="text-[10px] text-amber-600 font-bold uppercase tracking-wider mb-1">Vitals-Based Preliminary Zone</p>
+                                                            <p className={`text-lg font-black ${preliminaryZone === 'EMERGENCY' ? 'text-red-600' :
+                                                                preliminaryZone === 'URGENT' ? 'text-orange-600' :
+                                                                    preliminaryZone === 'SEMI_URGENT' ? 'text-yellow-600' : 'text-green-600'
+                                                                }`}>{preliminaryZone}</p>
+                                                            <p className="text-[10px] text-amber-500 mt-1">AI analysis still running...</p>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ) : errorMessage ? (
+                                                <div className="flex flex-col items-center py-4 w-full text-center">
+                                                    <XCircle className="text-red-400 mb-3" size={40} />
+                                                    <p className="text-sm font-bold text-red-600 mb-1">Analysis Failed</p>
+                                                    <p className="text-xs text-slate-500 max-w-[220px]">{errorMessage}</p>
+                                                    <button
+                                                        onClick={() => { setErrorMessage(null); setUploadStatus(''); }}
+                                                        className="mt-3 text-xs text-teal-600 underline"
+                                                    >Try Again</button>
                                                 </div>
                                             ) : (
+
                                                 <div className="flex flex-col items-center w-full py-4 text-center">
                                                     <div className={`mb-4 w-20 h-20 rounded-3xl flex items-center justify-center shadow-lg transition-transform hover:scale-105 duration-300 ${finalZone === 'EMERGENCY' ? 'bg-red-500 text-white' :
                                                         finalZone === 'URGENT' ? 'bg-orange-500 text-white' :

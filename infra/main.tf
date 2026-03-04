@@ -1,83 +1,67 @@
 # ════════════════════════════════════════════
-#  VaidyaSaarathi - MedGemma SageMaker Infra
-#  SageMaker Model + Endpoint Resources
+#  VaidyaSaarathi — MedGemma SageMaker Infra
+#  SageMaker Model + Endpoint ONLY
+#  Storage (S3/DynamoDB) is in infra_storage/
 # ════════════════════════════════════════════
 
-# ── SageMaker Model (HuggingFace TGI + MedGemma weights) ───────────────
+# ── IAM propagation wait ─────────────────────────────────────────────────────
+# SageMaker endpoint creation fails if it starts before IAM role is fully
+# propagated globally. The 15s sleep eliminates the race condition.
+
+resource "time_sleep" "iam_propagation" {
+  depends_on      = [aws_iam_role.sagemaker_exec]
+  create_duration = "15s"
+}
+
+# ── SageMaker Model (HuggingFace TGI + MedGemma weights) ────────────────────
 
 resource "aws_sagemaker_model" "medgemma" {
   name               = "${local.name_prefix}-medgemma-model"
   execution_role_arn = aws_iam_role.sagemaker_exec.arn
 
+  depends_on = [time_sleep.iam_propagation]
+
   primary_container {
     image = local.tgi_image_uri
 
     environment = {
-      # HuggingFace standard Inference Container variables
-      HF_MODEL_ID                = var.medgemma_model_id
-      HF_TOKEN                   = var.hf_token
-      SM_NUM_GPUS                = "1"
-      MAX_INPUT_LENGTH           = "3072"
-      MAX_TOTAL_TOKENS           = "4096"
+      HF_MODEL_ID      = var.medgemma_model_id
+      HF_TOKEN         = var.hf_token
+      SM_NUM_GPUS      = "1"
+      MAX_INPUT_LENGTH = "3072"
+      MAX_TOTAL_TOKENS = "4096"
     }
   }
 
-  tags = {
-    Name = "${local.name_prefix}-medgemma-model"
-  }
+  tags = { Name = "${local.name_prefix}-medgemma-model" }
 }
 
-# ── Endpoint Configuration ──────────────────────────────────────────────
+# ── Endpoint Configuration ───────────────────────────────────────────────────
 
 resource "aws_sagemaker_endpoint_configuration" "medgemma" {
   name = "${local.name_prefix}-medgemma-epc"
 
   production_variants {
-    variant_name           = "primary"
-    model_name             = aws_sagemaker_model.medgemma.name
-    instance_type          = var.medgemma_instance_type
-    initial_instance_count = var.medgemma_initial_instance_count
+    variant_name                                      = "primary"
+    model_name                                        = aws_sagemaker_model.medgemma.name
+    instance_type                                     = var.medgemma_instance_type
+    initial_instance_count                            = var.medgemma_initial_instance_count
     container_startup_health_check_timeout_in_seconds = 600
-
-    # Enable model data capture (for monitoring / audit)
-    # Uncomment in production:
-    # managed_instance_scaling {
-    #   status         = "ENABLED"
-    #   min_instance_count = 1
-    #   max_instance_count = 2
-    # }
   }
 
-  # Data capture config for HIPAA audit trail (uncomment for prod)
-  # data_capture_config {
-  #   enable_capture             = true
-  #   initial_sampling_percentage = 100
-  #   destination_s3_uri         = "s3://${aws_s3_bucket.artifacts.bucket}/data-capture"
-  #   capture_options {
-  #     capture_mode = "Input"
-  #   }
-  #   capture_options {
-  #     capture_mode = "Output"
-  #   }
-  # }
-
-  tags = {
-    Name = "${local.name_prefix}-medgemma-epc"
-  }
+  tags = { Name = "${local.name_prefix}-medgemma-epc" }
 }
 
-# ── Real-Time Inference Endpoint ────────────────────────────────────────
+# ── Real-Time Inference Endpoint ─────────────────────────────────────────────
 
 resource "aws_sagemaker_endpoint" "medgemma" {
   name                 = "${local.name_prefix}-medgemma-endpoint"
   endpoint_config_name = aws_sagemaker_endpoint_configuration.medgemma.name
 
-  tags = {
-    Name = "${local.name_prefix}-medgemma-endpoint"
-  }
+  tags = { Name = "${local.name_prefix}-medgemma-endpoint" }
 }
 
-# ── CloudWatch Alarms for Endpoint Health ───────────────────────────────
+# ── CloudWatch Alarms for Endpoint Health ────────────────────────────────────
 
 resource "aws_cloudwatch_metric_alarm" "endpoint_invocation_errors" {
   alarm_name          = "${local.name_prefix}-medgemma-invocation-errors"
@@ -89,13 +73,12 @@ resource "aws_cloudwatch_metric_alarm" "endpoint_invocation_errors" {
   statistic           = "Sum"
   threshold           = 5
   alarm_description   = "MedGemma endpoint is throwing too many errors"
+  treat_missing_data  = "notBreaching"
 
   dimensions = {
     EndpointName = aws_sagemaker_endpoint.medgemma.name
     VariantName  = "primary"
   }
-
-  treat_missing_data = "notBreaching"
 }
 
 resource "aws_cloudwatch_metric_alarm" "endpoint_latency_high" {
@@ -106,13 +89,12 @@ resource "aws_cloudwatch_metric_alarm" "endpoint_latency_high" {
   namespace           = "AWS/SageMaker"
   period              = 60
   extended_statistic  = "p90"
-  threshold           = 10000  # 10s P90 latency threshold (microseconds → ms)
+  threshold           = 10000000 # 10s in microseconds
   alarm_description   = "MedGemma P90 latency exceeds 10 seconds"
+  treat_missing_data  = "notBreaching"
 
   dimensions = {
     EndpointName = aws_sagemaker_endpoint.medgemma.name
     VariantName  = "primary"
   }
-
-  treat_missing_data = "notBreaching"
 }

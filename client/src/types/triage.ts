@@ -27,8 +27,11 @@ export interface TriageRecord {
     vitals?: VitalSigns | null;
     risk_score: number;
     triage_tier: 'EMERGENCY' | 'URGENT' | 'SEMI_URGENT' | 'ROUTINE';
+    preliminary_zone?: 'EMERGENCY' | 'URGENT' | 'SEMI_URGENT' | 'ROUTINE' | null; // vitals-only fast estimate
     specialty: string;
-    status: 'pending' | 'in_progress' | 'ready_for_review' | 'finalized' | 'exported';
+    patient_age?: number | null;
+    status: 'pending' | 'in_progress' | 'ready_for_review' | 'finalized' | 'exported' | 'failed';
     created_at: string;
     updated_at: string;
 }
+

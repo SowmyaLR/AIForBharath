@@ -1,11 +1,25 @@
+# ── Read ALB DNS from infra_be automatically ──────────────────────────────
+
+data "terraform_remote_state" "be" {
+  backend = "local"
+  config  = { path = "../infra_be/terraform.tfstate" }
+}
+
+locals {
+  # Prefer remote state value; fall back to var.backend_api_url if infra_be not applied yet
+  api_url = try(
+    data.terraform_remote_state.be.outputs.alb_dns_name,
+    var.backend_api_url
+  )
+}
+
+# ── Amplify App ───────────────────────────────────────────────────────────
+
 resource "aws_amplify_app" "vaidya" {
-  name       = "${var.project}-${var.environment}-frontend"
-  repository = var.github_repo_url
-  
-  # OAuth token for GitHub access
+  name         = "${var.project}-${var.environment}-frontend"
+  repository   = var.github_repo_url
   access_token = var.github_token
 
-  # Build spec for Client monorepo
   build_spec = <<-EOT
     version: 1
     frontend:
@@ -26,7 +40,7 @@ resource "aws_amplify_app" "vaidya" {
   EOT
 
   environment_variables = {
-    NEXT_PUBLIC_API_URL = var.backend_api_url
+    NEXT_PUBLIC_API_URL = local.api_url
     ENV                 = var.environment
   }
 
@@ -41,6 +55,5 @@ resource "aws_amplify_branch" "main" {
   branch_name = "main"
 
   enable_auto_build = true
-
-  framework = "Next.js - SSR"
+  framework         = "Next.js - SSR"
 }

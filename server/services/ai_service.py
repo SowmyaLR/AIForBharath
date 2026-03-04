@@ -3,6 +3,7 @@ import io
 import re
 import json
 import time
+import logging
 import librosa
 import numpy as np
 import tempfile
@@ -15,6 +16,8 @@ from typing import Optional, List, Dict, Any
 from transformers import pipeline
 from faster_whisper import WhisperModel
 
+logger = logging.getLogger(__name__)
+
 # Suppress warnings as per prototype
 warnings.filterwarnings("ignore", category=UserWarning, module="librosa")
 warnings.filterwarnings("ignore", category=FutureWarning, module="librosa")
@@ -23,19 +26,63 @@ warnings.filterwarnings("ignore", message=".*return_token_timestamps.*")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 APP_ENV = os.getenv("APP_ENV", "dev")  # 'dev' = Ollama | 'demo' = SageMaker
 SAGEMAKER_MEDGEMMA_ENDPOINT = os.getenv("SAGEMAKER_MEDGEMMA_ENDPOINT", "")
+AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 
 if APP_ENV == "demo":
     try:
         import boto3
-        _sm_runtime = boto3.client("sagemaker-runtime", region_name=os.getenv("AWS_REGION", "ap-south-1"))
-        print(f"[ENV] DEMO mode: SageMaker backend active (endpoint: {SAGEMAKER_MEDGEMMA_ENDPOINT})")
+        from botocore.config import Config
+        _sm_config = Config(read_timeout=60, connect_timeout=5, retries={"max_attempts": 1})
+        _sm_runtime = boto3.client("sagemaker-runtime", region_name=AWS_REGION, config=_sm_config)
+        logger.info(json.dumps({"event": "demo_mode_init", "endpoint": SAGEMAKER_MEDGEMMA_ENDPOINT}))
     except ImportError:
-        print("[ENV WARNING] boto3 not installed. Falling back to Ollama.")
+        logger.warning(json.dumps({"event": "boto3_missing_fallback_ollama"}))
         APP_ENV = "dev"
         _sm_runtime = None
 else:
     _sm_runtime = None
-    print(f"[ENV] DEV mode: Ollama backend active ({OLLAMA_HOST})")
+    logger.info(json.dumps({"event": "dev_mode_init", "ollama_host": OLLAMA_HOST}))
+
+
+def _invoke_sagemaker_with_retry(body: dict, max_attempts: int = 3) -> dict:
+    """
+    Invoke SageMaker endpoint with exponential backoff retry.
+    Handles ModelNotReadyException (endpoint loading) and throttling.
+    """
+    for attempt in range(max_attempts):
+        try:
+            resp = _sm_runtime.invoke_endpoint(
+                EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
+                ContentType="application/json",
+                Body=json.dumps(body)
+            )
+            return json.loads(resp["Body"].read().decode("utf-8"))
+        except _sm_runtime.exceptions.ModelNotReadyException:
+            wait = min(2 ** attempt, 30)
+            logger.warning(json.dumps({
+                "event": "sagemaker_model_not_ready",
+                "attempt": attempt + 1,
+                "retry_in_s": wait
+            }))
+            if attempt < max_attempts - 1:
+                time.sleep(wait)
+            else:
+                raise AIServiceError("SageMaker endpoint not ready after retries. Endpoint may be starting up.")
+        except Exception as e:
+            if "ThrottlingException" in str(type(e).__name__):
+                wait = min(2 ** attempt * 2, 30)
+                logger.warning(json.dumps({"event": "sagemaker_throttled", "attempt": attempt + 1, "retry_in_s": wait}))
+                if attempt < max_attempts - 1:
+                    time.sleep(wait)
+                    continue
+            raise
+
+
+class AIServiceError(Exception):
+    """Raised when AI inference fails after all retries."""
+    pass
+
+
 
 
 # Clinical Triage Constants
@@ -212,7 +259,7 @@ class AudioProcessor:
             traceback.print_exc()
             return {"score": 0.0, "interpretation": "Error analyzing audio.", "findings": []}
 
-    def generate_soap_note(self, transcript: str, risk_data: dict, vitals: Optional[dict] = None) -> dict:
+    def generate_soap_note(self, transcript: str, risk_data: dict, vitals: Optional[dict] = None, age: Optional[int] = None) -> dict:
         """Prototype generation logic with strict JSON output"""
         print("\n[AI DEBUG] Generating SOAP Note via Ollama...")
         
@@ -221,78 +268,58 @@ class AudioProcessor:
         if vitals:
             vitals_str = ", ".join([f"{k}: {v}" for k, v in vitals.items() if v])
 
+        age_info = f"Age: {age}" if age else "Age: Not provided"
+
         prompt = f"""
-        You are a highly reliable clinical triage AI operating in a structured medical documentation mode.
+        You are a Senior Clinical Triage Specialist AI. Your goal is to generate professional, detailed, and actionable medical documentation.
 
-        You MUST return ONLY valid JSON.
-        Do NOT include markdown.
-        Do NOT include headings outside JSON.
-        Do NOT include commentary.
-        Do NOT include explanations before or after the JSON.
-        The output MUST be fully parseable using a JSON parser.
-
-        --------------------------------------
-        INPUT DATA
-        --------------------------------------
-        Patient Transcript:
-        \"\"\"{transcript}\"\"\"
-
-        Patient Vitals:
-        {vitals_str}
-
-        HeAR Acoustic Deviation Score: {risk_data['score']:.1f}/10
-
-        --------------------------------------
-        CLINICAL WEIGHTING LOGIC
-        --------------------------------------
-        1. The Acoustic Deviation Score (>5.0) should be given higher clinical importance 
-           ONLY when symptoms are respiratory or cardiac in nature 
-           (e.g., cough, breathlessness, chest pain, palpitations).
-
-        2. If symptoms are non-respiratory/non-cardiac, treat the Acoustic Score 
-           as a secondary contextual baseline only.
-
-        3. Infer observable clinical signs from transcript language where possible 
-           (e.g., audible respiratory distress, speech clarity, distress level, 
-           weakness, confusion, visible swelling, etc.).
-
-        4. Use structured clinical reasoning consistent with real-world triage standards.
-
-        --------------------------------------
-        OUTPUT FORMAT (STRICT JSON ONLY)
-        --------------------------------------
-
+        --- 
+        FEW-SHOT EXAMPLE OF EXPECTED QUALITY:
+        
+        INPUT:
+        Transcript: "I've had a really bad cough for 3 days, it's getting worse and I'm feeling a bit short of breath now. My chest feels slightly tight."
+        Age: 65
+        Vitals: Temperature: 38.5, BP: 130/85, HR: 95, SpO2: 94, RR: 22
+        Acoustic Score: 6.5/10
+        
+        OUTPUT:
         {{
           "soap_note": {{
-            "subjective": "Detailed symptoms, onset, duration, associated symptoms, relevant history.",
-            "objective": "Observed or inferred findings including Acoustic Deviation Score and inferred clinical signs.",
-            "assessment": "Context-aware clinical reasoning with prioritized differential diagnoses.",
-            "plan": "Clear next steps: investigations, monitoring, referrals, treatment suggestions, follow-up."
+            "subjective": "Patient reports a productive cough of 3 days duration, increasing in severity. Acute onset of shortness of breath and chest tightness today. Denies chest pain, hemoptysis, or known sick contacts.",
+            "objective": "Patient is febrile (38.5°C) and tachypneic (RR 22). Mild respiratory effort audible in audio. Moderate oxygen desaturation (SpO2 94%) on room air. HeAR Acoustic Deviation Score (6.5/10) indicates significant acoustic instability consistent with moderate respiratory distress.",
+            "assessment": "Likely lower respiratory tract infection (e.g., Pneumonia) vs. Acute Bronchitis. Triage Tier: URGENT due to combination of fever, tachypnea, and oxygen desaturation.",
+            "plan": "1. Immediate physician evaluation. 2. Initiate supplemental oxygen if SpO2 < 94%. 3. Obtain Chest X-ray and CBC with diff. 4. Monitor vitals and work of breathing every 15 minutes."
           }},
           "metadata": {{
             "symptoms": [
-              {{
-                "name": "symptom name",
-                "severity": "MILD|MODERATE|SEVERE",
-                "category": "RESPIRATORY|CARDIAC|NEUROLOGICAL|GASTROINTESTINAL|GENERAL|OTHER"
-              }}
+              {{"name": "cough", "severity": "SEVERE", "category": "RESPIRATORY"}},
+              {{"name": "shortness of breath", "severity": "MODERATE", "category": "RESPIRATORY"}}
             ],
-            "triage_tier": "EMERGENCY|URGENT|SEMI_URGENT|ROUTINE",
-            "clinical_reasoning": "Concise explanation for triage tier selection.",
-            "red_flags_present": true|false
+            "triage_tier": "URGENT",
+            "clinical_reasoning": "Escalated to URGENT due to hypoxia (94%) and systemic signs (fever) paired with high acoustic instability.",
+            "red_flags_present": true
           }}
         }}
+        ---
 
-        --------------------------------------
-        VALIDATION REQUIREMENTS
-        --------------------------------------
-        - The response MUST be valid JSON.
-        - No trailing commas.
-        - Boolean values must be true or false (lowercase).
-        - No additional text outside the JSON object.
-        - If formatting is incorrect, internally correct it before responding.
+        Now, process the following real-time patient data following the EXACT same professional format and detail level:
 
-        Generate the structured clinical output now.
+        PATIENT DATA:
+        Transcript: \"\"\"{transcript}\"\"\"
+        {age_info}
+        Vitals: {vitals_str}
+        HeAR Acoustic Deviation Score: {risk_data['score']:.1f}/10
+
+        REQUIREMENTS:
+        1. Return ONLY valid JSON.
+        2. DO NOT summarize instructions. Provide ACTUAL clinical content.
+        3. Subjective: Include onset, duration, and specific symptoms mentioned.
+        4. Objective: Synthesize the vitals AND the Acoustic Score into a clinical observation.
+        5. Assessment: Provide a context-aware reasoning with potential differential diagnoses.
+        6. Plan: List 3-4 specific, actionable clinical next steps.
+        7. No markdown, no pre-text, no post-text.
+
+        JSON OUTPUT:
         """
         
         print(f"[AI DEBUG] Ollama Prompt Built ({len(prompt)} chars)")
@@ -325,10 +352,17 @@ class AudioProcessor:
             if full_json:
                 # Support both new and old structures for backward compatibility
                 soap_obj = full_json.get("soap_note", full_json)
-                subjective = soap_obj.get("subjective", full_json.get("SUBJECTIVE", ""))
-                objective = soap_obj.get("objective", full_json.get("OBJECTIVE", ""))
-                assessment = soap_obj.get("assessment", full_json.get("ASSESSMENT", ""))
-                plan = soap_obj.get("plan", full_json.get("PLAN", ""))
+                
+                # Helper to handle list or string output from AI
+                def _ensure_str(val):
+                    if isinstance(val, list):
+                        return " ".join(str(i) for i in val)
+                    return str(val) if val is not None else ""
+
+                subjective = _ensure_str(soap_obj.get("subjective", full_json.get("SUBJECTIVE", "")))
+                objective = _ensure_str(soap_obj.get("objective", full_json.get("OBJECTIVE", "")))
+                assessment = _ensure_str(soap_obj.get("assessment", full_json.get("ASSESSMENT", "")))
+                plan = _ensure_str(soap_obj.get("plan", full_json.get("PLAN", "")))
                 meta_data = full_json.get("metadata", full_json.get("METADATA", full_json))
             else:
                 # Fallback to tag-based if JSON fails
@@ -377,7 +411,13 @@ class AudioProcessor:
             response = _sm_runtime.invoke_endpoint(
                 EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
                 ContentType="application/json",
-                Body=json.dumps({"inputs": prompt, "parameters": {"max_new_tokens": 512, "temperature": 0.1}})
+                Body=json.dumps({
+                    "inputs": prompt, 
+                    "parameters": {
+                        "max_new_tokens": 1024, 
+                        "temperature": 0.1
+                    }
+                })
             )
             result = json.loads(response["Body"].read().decode("utf-8"))
             # SageMaker HuggingFace TGI schema: [{"generated_text": "..."}]
@@ -392,7 +432,7 @@ class AudioProcessor:
                     "model": "alibayram/medgemma",
                     "prompt": prompt,
                     "stream": False,
-                    "options": {"num_predict": 512, "temperature": 0.1, "num_thread": 4}
+                    "options": {"num_predict": 1024, "temperature": 0.1, "num_thread": 4}
                 }
             )
             response.raise_for_status()

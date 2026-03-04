@@ -1,13 +1,19 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Header
 from typing import Optional, List
 import datetime
 import os
+import json
+import logging
+import time
 from services.triage_service import get_triage_service, TriageRecord, VitalSigns, SOAPNote
 from services.ai_service import AudioProcessor, AIServiceError
+
+logger = logging.getLogger(__name__)
 
 APP_ENV = os.getenv("APP_ENV", "dev")
 AUDIO_BUCKET = os.getenv("AUDIO_S3_BUCKET", "")
 AUDIO_DIR = "storage/audio"
+MAX_AUDIO_BYTES = 10 * 1024 * 1024  # 10 MB hard limit
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 router = APIRouter(prefix="/triage", tags=["triage"])
@@ -17,12 +23,35 @@ triage_service = get_triage_service()
 try:
     ai_processor = AudioProcessor()
 except Exception as e:
-    print(f"Warning: Failed to init AudioProcessor: {e}")
+    logger.warning(json.dumps({"event": "ai_processor_init_failed", "error": str(e)}))
     ai_processor = None
 
 from starlette.concurrency import run_in_threadpool
 import asyncio
-import time
+
+
+def _calculate_preliminary_zone(vitals: Optional[VitalSigns]) -> str:
+    """
+    Deterministic vitals-only triage zone.
+    Called after Whisper+HeAR complete if MedGemma hasn't responded within 10 seconds.
+    Returns a zone string — same format as AI-derived triage_tier.
+    """
+    if not vitals:
+        return "ROUTINE"
+
+    bp_sys = vitals.blood_pressure_systolic
+    hr = vitals.heart_rate
+    spo2 = vitals.oxygen_saturation
+    temp = vitals.temperature
+
+    if bp_sys >= 180 or bp_sys < 70 or hr > 150 or hr < 40 or spo2 < 88 or temp >= 40.0:
+        return "EMERGENCY"
+    elif bp_sys >= 160 or hr > 120 or spo2 < 92 or temp >= 38.5:
+        return "URGENT"
+    elif bp_sys >= 140 or hr > 100 or spo2 < 95:
+        return "SEMI_URGENT"
+    else:
+        return "ROUTINE"
 
 
 def upload_audio(audio_bytes: bytes, filename: str) -> str:
@@ -35,11 +64,10 @@ def upload_audio(audio_bytes: bytes, filename: str) -> str:
             s3_key = f"triage-audio/{filename}"
             s3.put_object(Bucket=AUDIO_BUCKET, Key=s3_key, Body=audio_bytes)
             uri = f"s3://{AUDIO_BUCKET}/{s3_key}"
-            print(f"[DEMO] Audio uploaded to S3: {uri}")
+            logger.info(json.dumps({"event": "audio_uploaded_s3", "uri": uri}))
             return uri
         except Exception as e:
-            print(f"[WARNING] S3 upload failed, falling back to local: {e}")
-    # Dev mode / S3 fallback
+            logger.warning(json.dumps({"event": "s3_upload_failed_fallback_local", "error": str(e)}))
     file_path = f"{AUDIO_DIR}/{filename}"
     with open(file_path, "wb") as f:
         f.write(audio_bytes)
@@ -47,39 +75,80 @@ def upload_audio(audio_bytes: bytes, filename: str) -> str:
 
 
 async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, language: str):
-    """Background task to run the AI pipeline with threadpool offloading"""
+    """
+    Background task: run the full AI pipeline.
+
+    Phase 1 (parallel):  Whisper ASR + HeAR bioacoustic analysis
+    Vitals fallback:      If MedGemma takes > 10s, write preliminary_zone from vitals only
+    Phase 2 (sequential): MedGemma SOAP note + triage zone
+    """
     if not ai_processor:
-         await triage_service.update_triage_status(triage_id, "failed_ai_init")
-         return
-         
+        await triage_service.update_triage_status(triage_id, "failed")
+        logger.error(json.dumps({"event": "pipeline_failed", "triage_id": triage_id, "reason": "ai_processor_not_initialized"}))
+        return
+
     try:
         await triage_service.update_triage_status(triage_id, "in_progress")
-        
         pipeline_start = time.time()
-        print(f"\n[TIMER] Triage {triage_id}: Pipeline started.")
-        print(f"DEBUG: Processing Triage {triage_id}. Offloading to threads.")
-        
-        # Parallel transcription and acoustic analysis
+
+        # ── Phase 1: Parallel Whisper + HeAR ─────────────────────────────────
         t_parallel_start = time.time()
         transcript_task = run_in_threadpool(ai_processor.transcribe, audio_bytes, language)
         anomaly_task = run_in_threadpool(ai_processor.detect_anomalies, audio_bytes)
-        
         transcript, anomalies = await asyncio.gather(transcript_task, anomaly_task)
         t_parallel_end = time.time()
-        print(f"[TIMER] Parallelized ASR + Acoustic Analysis: {t_parallel_end - t_parallel_start:.2f}s")
-        
-        # Reasoning step
-        vitals_dict = None
+        logger.info(json.dumps({
+            "event": "asr_acoustic_complete",
+            "triage_id": triage_id,
+            "latency_s": round(t_parallel_end - t_parallel_start, 2)
+        }))
+
+        # ── Fetch record for vitals (for fallback and MedGemma context) ───────
         record = await triage_service.get_triage(triage_id)
-        if record and record.vitals:
-            vitals_dict = record.vitals.dict()
-            
+        vitals_dict = record.vitals.dict() if (record and record.vitals) else None
+
+        # ── Phase 2: MedGemma with 10-second vitals-only fallback ────────────
         t_soap_start = time.time()
-        analysis = await run_in_threadpool(ai_processor.generate_soap_note, transcript, anomalies, vitals_dict)
+        fallback_written = False
+
+        async def _medgemma_with_fallback():
+            nonlocal fallback_written
+            # Run MedGemma in a thread — shield() prevents wait_for from cancelling it on timeout
+            medgemma_task = asyncio.ensure_future(
+                run_in_threadpool(ai_processor.generate_soap_note, transcript, anomalies, vitals_dict, record.patient_age)
+            )
+            try:
+                # asyncio.shield() keeps medgemma_task alive even if wait_for times out
+                analysis = await asyncio.wait_for(asyncio.shield(medgemma_task), timeout=10.0)
+                return analysis
+            except asyncio.TimeoutError:
+                # Write vitals-only guardrail zone while MedGemma continues in background
+                if record and record.vitals:
+                    prelim = _calculate_preliminary_zone(record.vitals)
+                    try:
+                        await _update_preliminary_zone(triage_id, prelim)
+                        fallback_written = True
+                        logger.info(json.dumps({
+                            "event": "preliminary_zone_written",
+                            "triage_id": triage_id,
+                            "preliminary_zone": prelim
+                        }))
+                    except Exception:
+                        pass
+                # medgemma_task is still running (not cancelled) — wait for it to finish
+                return await medgemma_task
+
+        analysis = await _medgemma_with_fallback()
+
         t_soap_end = time.time()
-        print(f"[TIMER] SOAP + Zone Prediction (MedGemma): {t_soap_end - t_soap_start:.2f}s")
-        
-        # Save results
+        logger.info(json.dumps({
+            "event": "soap_complete",
+            "triage_id": triage_id,
+            "latency_s": round(t_soap_end - t_soap_start, 2),
+            "fallback_was_shown": fallback_written
+        }))
+
+        # ── Write final results to DynamoDB ───────────────────────────────────
         record = await triage_service.get_triage(triage_id)
         if record:
             record.transcription = transcript
@@ -87,27 +156,79 @@ async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, languag
             record.specialty = analysis.get("specialty", "General Medicine")
             record.risk_score = analysis.get("risk_score", 0)
             record.triage_tier = analysis.get("triage_tier", "ROUTINE")
+            record.preliminary_zone = None  # clear fallback — final zone is now set
             record.status = "ready_for_review"
-            await triage_service.update_triage_status(triage_id, "ready_for_review")
-            
-            total_elapsed = time.time() - pipeline_start
+            # save_triage_record() does a full put_item — persists ALL fields, not just status
+            await triage_service.save_triage_record(record)
+
+            total = round(time.time() - pipeline_start, 2)
+            parallel_time = round(t_parallel_end - t_parallel_start, 2)
+            soap_time = round(t_soap_end - t_soap_start, 2)
+
+            # ── PERFORMANCE SUMMARY (for comparison) ──────────────────────────
             print(
-                f"\n[TIMER] ══════════════════════════════════════\n"
-                f"[TIMER]  TRIAGE PIPELINE COMPLETE\n"
-                f"[TIMER]  ASR + Acoustic  : {t_parallel_end - t_parallel_start:.2f}s\n"
-                f"[TIMER]  SOAP + Zone     : {t_soap_end - t_soap_start:.2f}s\n"
-                f"[TIMER]  TOTAL (End-to-End): {total_elapsed:.2f}s\n"
-                f"[TIMER]  Zone Assigned   : {record.triage_tier}\n"
-                f"[TIMER] ══════════════════════════════════════\n"
+                f"\n{'='*50}\n"
+                f"  TRIAGE PERFORMANCE SUMMARY\n"
+                f"{'─'*50}\n"
+                f"  Triage ID        : {triage_id}\n"
+                f"  Phase 1 (W+H)    : {parallel_time}s\n"
+                f"  Phase 2 (Gemma)  : {soap_time}s\n"
+                f"  Total Latency    : {total}s\n"
+                f"  Final Tier       : {record.triage_tier}\n"
+                f"{'='*50}\n"
             )
-            print(f"[API DEBUG] Triage {triage_id} updated and ready. Specialty: {record.specialty}. Bucket: {record.triage_tier}")
-            print(f"[API DEBUG] SOAP Subjective: {record.soap_note.subjective[:50]}...")
-        else:
-            print(f"[API DEBUG] Record {triage_id} not found for update!")
-            
+
+            logger.info(json.dumps({
+                "event": "triage_pipeline_complete",
+                "triage_id": triage_id,
+                "total_latency_s": total,
+                "parallel_latency_s": parallel_time,
+                "soap_latency_s": soap_time,
+                "zone": record.triage_tier,
+                "specialty": record.specialty
+            }))
+
     except Exception as e:
-        print(f"AI Pipeline failed for {triage_id}: {e}")
+        logger.error(json.dumps({
+            "event": "pipeline_failed",
+            "triage_id": triage_id,
+            "error": str(e)
+        }))
         await triage_service.update_triage_status(triage_id, "failed")
+        # Write a user-facing error message so the frontend poll has something to show
+        try:
+            await triage_service.update_soap_note(triage_id, SOAPNote(
+                subjective="AI analysis could not be completed. Your recording and vitals are saved. Please retry or contact support.",
+                objective="",
+                assessment="Analysis failed",
+                plan="Please retry the submission or inform clinical staff."
+            ))
+        except Exception:
+            pass  # Best-effort; do not mask the original error
+
+
+async def _update_preliminary_zone(triage_id: str, zone: str):
+    """Write preliminary vitals-only zone to DynamoDB without changing overall status."""
+    import boto3
+    region = os.getenv("AWS_REGION", "ap-south-1")
+    table_name = os.getenv("DYNAMODB_TRIAGE_TABLE", "")
+    if APP_ENV == "demo" and table_name:
+        ddb = boto3.resource("dynamodb", region_name=region)
+        table = ddb.Table(table_name)
+        table.update_item(
+            Key={"id": triage_id},
+            UpdateExpression="SET preliminary_zone = :z, updated_at = :u",
+            ExpressionAttributeValues={
+                ":z": zone,
+                ":u": datetime.datetime.utcnow().isoformat()
+            }
+        )
+    else:
+        # In-memory fallback for dev mode
+        record = await triage_service.get_triage(triage_id)
+        if record:
+            record.preliminary_zone = zone
+
 
 @router.post("/", response_model=TriageRecord)
 async def create_triage(
@@ -120,12 +241,32 @@ async def create_triage(
     bp_dia: Optional[int] = Form(None),
     hr: Optional[int] = Form(None),
     rr: Optional[int] = Form(None),
-    spo2: Optional[int] = Form(None)
+    spo2: Optional[int] = Form(None),
+    patient_age: Optional[int] = Form(None),
+    x_idempotency_key: Optional[str] = Header(None)
 ):
-    """Upload audio for a patient and start triage pipeline with optional vitals"""
+    """Upload audio for a patient and start triage pipeline with optional vitals."""
+
+    # ── 1. Idempotency check — prevent double submission ──────────────────────
+    if x_idempotency_key:
+        existing = await triage_service.get_by_idempotency_key(x_idempotency_key)
+        if existing:
+            logger.info(json.dumps({
+                "event": "idempotent_request_deduplicated",
+                "idempotency_key": x_idempotency_key,
+                "existing_triage_id": existing.id
+            }))
+            return existing
+
+    # ── 2. File size guard ─────────────────────────────────────────────────────
     audio_bytes = await audio.read()
-    
-    # Create VitalSigns object if any data provided
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Audio file too large ({len(audio_bytes) // 1024}KB). Maximum size is 10MB."
+        )
+
+    # ── 3. Build VitalSigns if provided ───────────────────────────────────────
     vitals = None
     if any([temp, bp_sys, bp_dia, hr, rr, spo2]):
         vitals = VitalSigns(
@@ -139,75 +280,115 @@ async def create_triage(
             recorded_by="Nurse_Intake_01"
         )
 
-    # Save audio: S3 in demo mode, local disk in dev mode
+    # ── 4. Upload audio (S3 in demo, local in dev) ────────────────────────────
     audio_uri = upload_audio(audio_bytes, audio.filename)
-    
-    record = await triage_service.create_triage_record(patient_id, audio_uri, language, vitals)
-    
-    # Process asynchronously
+
+    # ── 5. Create DynamoDB record ─────────────────────────────────────────────
+    record = await triage_service.create_triage_record(
+        patient_id, audio_uri, language, vitals,
+        idempotency_key=x_idempotency_key,
+        patient_age=patient_age
+    )
+
+    # ── 6. Dispatch AI pipeline as background task ────────────────────────────
     background_tasks.add_task(_process_triage_audio_task, record.id, audio_bytes, language)
-    
+
+    logger.info(json.dumps({
+        "event": "triage_submitted",
+        "triage_id": record.id,
+        "patient_id": patient_id,
+        "audio_size_kb": len(audio_bytes) // 1024
+    }))
     return record
+
 
 @router.get("/queue", response_model=List[TriageRecord])
 async def get_queue(specialty: Optional[str] = None):
     return await triage_service.get_triage_queue(specialty)
 
+
 @router.get("/{triage_id}", response_model=TriageRecord)
 async def get_triage(triage_id: str):
     record = await triage_service.get_triage(triage_id)
     if not record:
-         raise HTTPException(status_code=404, detail="Triage record not found")
+        raise HTTPException(status_code=404, detail="Triage record not found")
     return record
+
 
 @router.post("/{triage_id}/vitals", response_model=TriageRecord)
 async def add_vitals(triage_id: str, vitals: VitalSigns):
     record = await triage_service.add_vitals(triage_id, vitals)
     if not record:
-         raise HTTPException(status_code=404, detail="Triage record not found")
+        raise HTTPException(status_code=404, detail="Triage record not found")
     return record
+
 
 @router.post("/{triage_id}/soap", response_model=TriageRecord)
 async def update_soap(triage_id: str, soap_note: SOAPNote):
     record = await triage_service.update_soap_note(triage_id, soap_note)
     if not record:
-         raise HTTPException(status_code=404, detail="Triage record not found or already finalized")
+        raise HTTPException(status_code=404, detail="Triage record not found or already finalized")
     return record
+
 
 @router.post("/{triage_id}/finalize", response_model=TriageRecord)
 async def finalize_triage(triage_id: str):
     record = await triage_service.update_triage_status(triage_id, "finalized")
     if not record:
-         raise HTTPException(status_code=404, detail="Triage record not found")
+        raise HTTPException(status_code=404, detail="Triage record not found")
     return record
 
+
+from services.ehr_service import ehr_service
+
 async def _process_ehr_export_task(triage_id: str):
-    """Background task to run FHIR generation and mock export"""
-    from services.ehr_service import ehr_service
-    record = await triage_service.get_triage(triage_id)
-    if not record: return
-    
+    """Background task to run FHIR generation and export."""
     try:
-        print(f"[EHR DEBUG] Background export started for triage {triage_id}")
+        print(f"[EHR DEBUG] Starting background export task for: {triage_id}")
+        record = await triage_service.get_triage(triage_id)
+        if not record:
+            print(f"[EHR ERROR] Triage record {triage_id} not found for export.")
+            return
+
+        logger.info(json.dumps({"event": "ehr_export_started", "triage_id": triage_id}))
         success = await ehr_service.export_to_ehr(record)
         if success:
             await triage_service.update_triage_status(triage_id, "exported")
-            print(f"[EHR DEBUG] Background export successful for triage {triage_id}")
+            logger.info(json.dumps({"event": "ehr_export_success", "triage_id": triage_id}))
+            print(f"[EHR SUCCESS] Triage {triage_id} exported to FHIR.")
         else:
-            print(f"[EHR ERROR] Background export failed for triage {triage_id}")
+            logger.error(json.dumps({"event": "ehr_export_failed", "triage_id": triage_id}))
+            print(f"[EHR ERROR] Export failed for triage {triage_id}.")
     except Exception as e:
-        print(f"[EHR ERROR] Background export task failed: {e}")
+        import traceback
+        traceback.print_exc()
+        logger.error(json.dumps({"event": "ehr_export_error", "triage_id": triage_id, "error": str(e)}))
+        print(f"[EHR CRITICAL ERROR] {str(e)}")
+
 
 @router.post("/{triage_id}/export")
 async def export_triage(triage_id: str, background_tasks: BackgroundTasks):
-    record = await triage_service.get_triage(triage_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Triage record not found")
+    print("\n" + "="*50)
+    print(f"[EHR API] >>> RECEIVED EXPORT REQUEST FOR: {triage_id}")
+    print("="*50)
+    
+    try:
+        record = await triage_service.get_triage(triage_id)
+        if not record:
+            print(f"[EHR API ERROR] Triage {triage_id} NOT FOUND in DB.")
+            raise HTTPException(status_code=404, detail="Triage record not found")
         
-    if record.status != "finalized":
-        raise HTTPException(status_code=400, detail="Triage must be finalized before export")
-    
-    # Trigger background processing
-    background_tasks.add_task(_process_ehr_export_task, triage_id)
-    
-    return {"status": "accepted", "message": "EHR Export started in background"}
+        print(f"[EHR API] Current Record Status: {record.status}")
+        
+        # Relax status check for debugging: Allow 'finalized' or 'exported'
+        valid_statuses = ["finalized", "exported"]
+        if record.status not in valid_statuses:
+            print(f"[EHR API REJECTED] Triage {triage_id} status is '{record.status}'. Must be in {valid_statuses}")
+            raise HTTPException(status_code=400, detail=f"Triage status '{record.status}' is not eligible for export.")
+
+        print(f"[EHR API] Queueing background task _process_ehr_export_task...")
+        background_tasks.add_task(_process_ehr_export_task, triage_id)
+        return {"status": "accepted", "message": "EHR Export started in background"}
+    except Exception as e:
+        print(f"[EHR API CRITICAL] Exception during export setup: {str(e)}")
+        raise
