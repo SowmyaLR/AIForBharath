@@ -37,10 +37,13 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS — locked to specific frontend origin, not wildcard
+# CORS — locked to specific frontend origins, not wildcard
+# FRONTEND_URL can be a comma-separated list of origins
+FRONTEND_ORIGINS = [url.strip() for url in FRONTEND_URL.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

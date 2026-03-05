@@ -116,6 +116,7 @@ class AIServiceError(Exception):
 class AudioProcessor:
     def __init__(self):
         # 1. Initialize Whisper Model (faster-whisper)
+        # 1. Initialize Whisper Model (faster-whisper)
         print("Loading ASR model (faster-whisper medium)...")
         # Use CPU with int8 quantization for high performance on both CPU and Apple Silicon
         # 'auto' will choose the best device available.
@@ -171,6 +172,7 @@ class AudioProcessor:
             task = "transcribe" if lang_code == "english" else "translate"
             
             print(f"[AI DEBUG] Running faster-whisper Inference (Task: {task}, Language: {whisper_lang})...")
+            t_asr_start = time.time()
             
             # faster-whisper transcribe returns a generator of segments
             segments, info = self.asr_model.transcribe(
@@ -187,6 +189,8 @@ class AudioProcessor:
             text_parts = [segment.text for segment in segments]
             text = " ".join(text_parts).strip()
             
+            t_asr_total = time.time() - t_asr_start
+            print(f"✅ [AI DEBUG] Transcription Complete in {t_asr_total:.2f}s")
             print(f"[AI DEBUG] Transcribe Result: {text[:200]}...")
             return text
         except Exception as e:
@@ -194,14 +198,14 @@ class AudioProcessor:
             return "Error processing audio."
 
     def detect_anomalies(self, audio_bytes: bytes) -> dict:
-        """Production-Safe Temporal Stability Strategy"""
+        """Production-Safe Temporal Stability Strategy (Vectorized Optimization)"""
         try:
             print(f"\n{'='*30}\n[AI TRACE] TEMPORAL STABILITY ANALYSIS START\n{'='*30}")
             t_start = time.time()
             data, sr = self.load_audio_robust(audio_bytes)
             
             if self.hear_serving_signature:
-                # 1. Split audio into 1-second chunks (prototype logic says 5-15 chunks)
+                # 1. Split audio into 1-second chunks
                 chunk_sec = 1.0
                 chunk_size = int(sr * chunk_sec)
                 chunks = [data[i:i+chunk_size] for i in range(0, len(data)-chunk_size, chunk_size)]
@@ -209,33 +213,29 @@ class AudioProcessor:
                 if not chunks:
                     chunks = [data] # fallback if audio < 1s
                 
-                print(f"[AI TRACE] Audio split into {len(chunks)} temporal chunks.")
+                print(f"[AI TRACE] Audio split into {len(chunks)} temporal chunks. Vectorizing inference...")
                 
-                # 2. Extract and Normalize Embeddings
-                chunk_embeddings = []
-                for i, chunk in enumerate(chunks):
-                    # Pad chunk to 2s if needed, or just follow user logic of flatten/norm
-                    input_tensor = tf.constant(np.expand_dims(chunk, axis=0), dtype=tf.float32)
-                    emb = self.hear_serving_signature(x=input_tensor)['output_0'].numpy().flatten()
-                    
-                    # Normalize to unit vector (critical for cosine similarity)
-                    norm = np.linalg.norm(emb)
-                    if norm > 0:
-                        emb = emb / norm
-                    chunk_embeddings.append(emb)
+                # 2. Extract and Normalize Embeddings (BATCHED)
+                # Stack all chunks into a single [Batch, Samples] tensor for massive speed boost
+                input_tensor = tf.constant(np.array(chunks), dtype=tf.float32)
                 
-                chunk_embeddings = np.vstack(chunk_embeddings)
+                # Single model call for all chunks (bypass Python loop overhead)
+                batch_embeddings = self.hear_serving_signature(x=input_tensor)['output_0'].numpy()
+                
+                # HeAR typically returns [Batch, Time, Dim] or similar; flatten to [Batch, Dim]
+                batch_embeddings = batch_embeddings.reshape(len(chunks), -1)
+                
+                # Vectorized L2 Normalization
+                norms = np.linalg.norm(batch_embeddings, axis=1, keepdims=True)
+                chunk_embeddings = np.divide(batch_embeddings, norms, out=np.zeros_like(batch_embeddings), where=norms > 0)
                 
                 # 3. Measure Internal Variability (Pairwise Cosine Similarity)
-                # High similarity = stable phonation. Low similarity = instability/anomalies.
                 similarity_matrix = cosine_similarity(chunk_embeddings)
                 avg_similarity = np.mean(similarity_matrix)
                 deviation_score = 1.0 - avg_similarity
                 
                 # Scale to 0-10 based on user's empirical multiplier (50)
                 risk_score = round(min(10.0, deviation_score * 50), 1)
-                
-                # Naming updated per user request to 'Acoustic Deviation Score'
                 interpretation = f"HeAR Acoustic Analysis: Acoustic Deviation Score {risk_score}/10"
             else:
                 print("\n>>> WARNING: LIBROSA FALLBACK TRIGGERED (HEAR UNAVAILABLE) <<<")

@@ -27,3 +27,8 @@ output "ecs_task_role_arn" {
   description = "ECS task IAM role ARN"
   value       = aws_iam_role.ecs_task.arn
 }
+
+output "api_gateway_proxy_url" {
+  description = "Secure HTTPS proxy for the backend ALB (Hackathon Demo ready)"
+  value       = aws_apigatewayv2_api.api_proxy.api_endpoint
+}

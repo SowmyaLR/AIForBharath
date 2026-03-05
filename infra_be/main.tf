@@ -179,8 +179,8 @@ resource "aws_ecs_task_definition" "api" {
   family                   = "${local.name_prefix}-api"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = "2048" # 2 vCPU — headroom for Whisper + HeAR in-process
-  memory                   = "8192" # 8 GB — Whisper ~1.5GB + HeAR ~2GB + app overhead
+  cpu                      = "4096" # 4 vCPU — Scaled for Demo Day performance
+  memory                   = "16384" # 16 GB — Scaled for Demo Day performance
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -235,6 +235,43 @@ resource "aws_ecs_task_definition" "api" {
 
 # ── ECS Service ──────────────────────────────────────────────────────────────
 
+# ── Secure HTTPS Proxy (API Gateway v2) ─────────────────────────────────────
+# AWS Amplify forbids HTTP targets in custom rules. 
+# We use API Gateway as an HTTPS bridge to our HTTP ALB.
+
+resource "aws_apigatewayv2_api" "api_proxy" {
+  name          = "${local.name_prefix}-api-proxy"
+  protocol_type = "HTTP"
+  
+  cors_configuration {
+    allow_origins = ["*"] # Backend internal CORS still applies
+    allow_methods = ["*"]
+    allow_headers = ["*"]
+  }
+
+  tags = { Name = "${local.name_prefix}-api-proxy" }
+}
+
+resource "aws_apigatewayv2_integration" "alb_integration" {
+  api_id           = aws_apigatewayv2_api.api_proxy.id
+  integration_type = "HTTP_PROXY"
+  integration_uri  = "http://${aws_lb.backend.dns_name}/{proxy}"
+  integration_method = "ANY"
+  payload_format_version = "1.0"
+}
+
+resource "aws_apigatewayv2_route" "default_route" {
+  api_id    = aws_apigatewayv2_api.api_proxy.id
+  route_key = "ANY /{proxy+}"
+  target    = "integrations/${aws_apigatewayv2_integration.alb_integration.id}"
+}
+
+resource "aws_apigatewayv2_stage" "api_stage" {
+  api_id      = aws_apigatewayv2_api.api_proxy.id
+  name        = "$default"
+  auto_deploy = true
+}
+
 resource "aws_ecs_service" "api" {
   name            = "${local.name_prefix}-api-service"
   cluster         = aws_ecs_cluster.main.id
@@ -245,7 +282,7 @@ resource "aws_ecs_service" "api" {
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = true # Required for default VPC without NAT gateway
+    assign_public_ip = true
   }
 
   load_balancer {
@@ -254,12 +291,12 @@ resource "aws_ecs_service" "api" {
     container_port   = 8000
   }
 
-  deployment_minimum_healthy_percent = 100 # Zero downtime during updates
-  deployment_maximum_percent         = 200 # Allow 2nd task during rollout
-  health_check_grace_period_seconds  = 180 # Whisper + HeAR load time buffer
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  health_check_grace_period_seconds  = 180
 
   deployment_circuit_breaker {
-    enable   = true  # Auto-rollback if new task fails health checks
+    enable   = true
     rollback = true
   }
 
