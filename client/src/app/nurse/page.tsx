@@ -67,6 +67,8 @@ export default function NurseIntakePage() {
             setPreliminaryZone(null);
             setErrorMessage(null);
             setTriageId(null);
+            setUploadStatus(''); // Reset upload status for next submission
+            setAudioBlob(null);
             // Regenerate idempotency key for each new recording
             idempotencyKeyRef.current = crypto.randomUUID();
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });

@@ -105,6 +105,11 @@ resource "aws_dynamodb_table" "triage" {
     type = "S"
   }
 
+  attribute {
+    name = "idempotency_key"
+    type = "S"
+  }
+
   # GSI 1 — per-patient triage history
   global_secondary_index {
     name            = "patient_id-index"
@@ -117,6 +122,13 @@ resource "aws_dynamodb_table" "triage" {
     name            = "status-created-index"
     hash_key        = "status"
     range_key       = "created_at"
+    projection_type = "ALL"
+  }
+
+  # GSI 3 — idempotency check (prevents double submits)
+  global_secondary_index {
+    name            = "idempotency-key-index"
+    hash_key        = "idempotency_key"
     projection_type = "ALL"
   }
 
