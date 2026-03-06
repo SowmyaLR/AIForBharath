@@ -380,9 +380,9 @@ sequenceDiagram
     
     UI->>API: GET /triage/{id}/status
     API->>DDB: Query status
-    DDB-->>API: {status: "complete", triage_tier: "URGENT"}
-    API-->>UI: Full SOAP + Zone
-    UI->>N: Display 🟡 URGENT + SOAP Note
+    DDB-->>API: {status: "complete", first_aid_precautions}
+    API-->>UI: Vital check results + First aid precautions
+    UI->>N: Display vital warnings + First aid instructions (NO zone prediction)
 ```
 
 ### Doctor Workflow
@@ -429,16 +429,23 @@ sequenceDiagram
 ### Key User Experience Features
 
 **Nurse Dashboard**:
+- Patient ID input field for quick patient identification
 - Real-time recording timer with waveform visualization
+- Vitals entry form (Temperature, BP, HR, SpO2, RR)
 - Instant submission feedback (202 Accepted)
 - Non-blocking UI with status polling
-- Color-coded zone badges (🔴 EMERGENCY, 🟡 URGENT, 🟠 SEMI_URGENT, 🟢 ROUTINE)
-- Preliminary zone display if AI takes > 10s
+- Basic vital check results with abnormality warnings
+- AI-generated first aid precautions for immediate care (if vitals show abnormalities)
+- No triage zone predictions (zones are for doctor review only)
+- Auto-reset after successful submission for next patient
 
 **Doctor Dashboard**:
 - Severity-sorted queue with specialty filtering
+- Color-coded zone badges (🔴 EMERGENCY, 🟡 URGENT, 🟠 SEMI_URGENT, 🟢 ROUTINE)
+- Complete AI-generated SOAP notes with triage tier assignment
 - Inline SOAP note editing with rich text support
 - Audio playback with transcript synchronization
+- Acoustic deviation scores as additional vital signs
 - One-click finalization with FHIR export
 - Patient history view (previous triage records)
 

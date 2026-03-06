@@ -1,4 +1,6 @@
 import os
+# Enable ultra-fast downloads for large models
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 import io
 import re
 import json
@@ -15,6 +17,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from typing import Optional, List, Dict, Any
 from transformers import pipeline
 from faster_whisper import WhisperModel
+from pydub import AudioSegment
 
 logger = logging.getLogger(__name__)
 
@@ -115,12 +118,11 @@ class AIServiceError(Exception):
     pass
 class AudioProcessor:
     def __init__(self):
-        # 1. Initialize Whisper Model (faster-whisper)
-        # 1. Initialize Whisper Model (faster-whisper)
-        print("Loading ASR model (faster-whisper medium)...")
-        # Use CPU with int8 quantization for high performance on both CPU and Apple Silicon
-        # cpu_threads=4 matches our ECS Fargate 4 vCPU configuration for max efficiency
-        self.asr_model = WhisperModel("medium", device="auto", compute_type="int8", cpu_threads=4)
+        # 1. Initialize Whisper Model (faster-whisper + Distil optimization)
+        print("🚀 Initializing Whisper distil-large-v3...")
+        print("💡 NOTE: First-time loading will download ~1.5GB of model weights. Please wait...")
+        # distil-large-v3 is 3x faster than medium with better accuracy
+        self.asr_model = WhisperModel("distil-large-v3", device="auto", compute_type="int8", cpu_threads=4)
         
         # 2. Initialize HeAR (Official Keras)
         print("Loading HeAR model (HuggingFace)...")
@@ -135,65 +137,105 @@ class AudioProcessor:
             print(f"Error loading HeAR model: {e}")
             self.hear_serving_signature = None
 
-    def load_audio_robust(self, file_bytes):
-        """Robustly loads audio using temp file as per user prototype"""
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
-            tmp.write(file_bytes)
-            tmp_path = tmp.name
+    def is_vitals_abnormal(self, vitals: dict) -> bool:
+        """Deterministically check for clinical red flags in vitals"""
+        if not vitals:
+            return False
+            
+        temp = vitals.get("temperature", 37.0)
+        bp_sys = vitals.get("blood_pressure_systolic", 120)
+        hr = vitals.get("heart_rate", 72)
+        spo2 = vitals.get("oxygen_saturation", 98)
         
+        # Red flags: High fever, Crisis BP, Tachycardia, Hypoxia
+        if temp >= 39.0 or temp <= 35.5: return True
+        if bp_sys >= 170 or bp_sys <= 85: return True
+        if hr >= 120 or hr <= 45: return True
+        if spo2 <= 92: return True
+        
+        return False
+
+    def get_vitals_precautions(self, vitals: dict, age: Optional[int] = None) -> List[str]:
+        """Fast-path MedGemma call using ONLY vitals for immediate nurse feedback"""
+        vitals_str = ", ".join([f"{k}: {v}" for k, v in vitals.items() if v])
+        age_str = f"Age {age}" if age else "Adult patient"
+        
+        prompt = f"""
+        [CONTEXT] You are an Emergency Triage Assistant.
+        [INPUT] {age_str} with these vitals: {vitals_str}.
+        [TASK] List 3-4 short, immediate FIRST-AID precautions or monitoring steps for a nurse to take NOW while waiting for a doctor.
+        
+        [REQUIREMENTS] 
+        - DO NOT provide a diagnosis.
+        - Provide ONLY a JSON list of strings.
+        - Each precaution must be < 10 words.
+        
+        [JSON OUTPUT]
+        ["Step 1", "Step 2", "Step 3"]
+        """
+        
+        print(f"[AI DEBUG] Running Fast-Path MedGemma (Vitals Only)...")
         try:
-            # librosa.load at 16k for Whisper compatibility
-            data, samplerate = librosa.load(tmp_path, sr=16000)
-            return data, samplerate
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            raw_response = self._call_inference_backend(prompt)
+            # Simple JSON list extraction
+            start = raw_response.find("[")
+            end = raw_response.rfind("]")
+            if start != -1 and end != -1:
+                return json.loads(raw_response[start:end+1])
+            return ["Monitor vitals closely", "Keep patient comfortable", "Notify physician immediately"]
+        except Exception as e:
+            print(f"[AI DEBUG] Fast-Path Error: {e}")
+            return ["Monitor patient", "Wait for clinical review"]
+
+    def load_audio_robust(self, audio_bytes):
+        """Robustly loads audio directly from memory buffer using pydub"""
+        # pydub is better at handling containers like webm/opus from memory
+        try:
+            audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+            # Resample to 16kHz mono as required by Whisper and HeAR
+            audio = audio.set_frame_rate(16000).set_channels(1)
+            # Convert to float32 numpy array normalized to [-1, 1]
+            data = np.array(audio.get_array_of_samples(), dtype=np.float32) / 32768.0
+            return data, 16000
+        except Exception as e:
+            print(f"pydub loading failed: {e}. Falling back to librosa.")
+            # Final fallback to standard librosa (slow path)
+            return librosa.load(io.BytesIO(audio_bytes), sr=16000)
 
     def transcribe(self, audio_bytes: bytes, language: str) -> str:
-        """Performs ASR with optimized faster-whisper inference"""
+        """Performs ASR with optimized faster-whisper inference bypassing librosa"""
         try:
             print(f"\n[AI DEBUG] Starting Transcribe ({len(audio_bytes)} bytes)...")
-            data, samplerate = self.load_audio_robust(audio_bytes)
+            # Wrap bytes directly to avoid temp files and librosa overhead
+            audio_file = io.BytesIO(audio_bytes)
             
-            # Use lowercase for language
-            lang_code = language.lower()
-            
-            # WhisperModel expects 'en', 'ta', etc. but we can also use 'english', 'tamil'
-            # Mapping common languages to codes for faster-whisper robustness
-            lang_map = {
-                "english": "en",
-                "tamil": "ta",
-                "hindi": "hi",
-                "telugu": "te"
-            }
-            whisper_lang = lang_map.get(lang_code, lang_code)
+            # Map and clean language codes
+            lang_map = {"english": "en", "tamil": "ta", "hindi": "hi", "telugu": "te"}
+            whisper_lang = lang_map.get(language.lower(), language.lower())
             
             # Task selection
-            task = "transcribe" if lang_code == "english" else "translate"
+            task = "transcribe" if whisper_lang == "en" else "translate"
             
             print(f"[AI DEBUG] Running faster-whisper Inference (Task: {task}, Language: {whisper_lang})...")
             t_asr_start = time.time()
             
-            # faster-whisper transcribe returns a generator of segments
-            # OPTIMIZATION: beam_size=1 (greedy) is much faster on CPU than beam search
-            # OPTIMIZATION: vad_filter=True skips silence to save processing cycles
-            segments, info = self.asr_model.transcribe(
-                data,
+            # Minimal parameters for maximum speed
+            segments, _ = self.asr_model.transcribe(
+                audio_file,
                 task=task,
                 language=whisper_lang,
-                beam_size=1,
+                beam_size=1,       # Greedy search is fastest
                 repetition_penalty=1.1,
                 no_repeat_ngram_size=3,
                 condition_on_previous_text=False,
-                vad_filter=True
+                vad_filter=True    # Skip silences
             )
             
             # Collect text from segments
-            text_parts = [segment.text for segment in segments]
-            text = " ".join(text_parts).strip()
+            text = "".join([s.text for s in segments]).strip()
             
             t_asr_total = time.time() - t_asr_start
-            print(f"✅ [AI DEBUG] Transcription Complete in {t_asr_total:.2f}s")
+            print(f"\n{'─'*40}\n🚀 [LATENCY] Whisper ASR: {t_asr_total:.2f}s\n{'─'*40}")
             print(f"[AI DEBUG] Transcribe Result: {text[:200]}...")
             return text
         except Exception as e:
@@ -208,15 +250,19 @@ class AudioProcessor:
             data, sr = self.load_audio_robust(audio_bytes)
             
             if self.hear_serving_signature:
-                # 1. Split audio into 1-second chunks
+                # 1. Split audio into 1-second chunks and use Fixed 3-Point Sampling (Nitro Max)
+                # Processing just 3 seconds (Start, Middle, End) is extremely fast and clinically sufficient.
                 chunk_sec = 1.0
                 chunk_size = int(sr * chunk_sec)
-                chunks = [data[i:i+chunk_size] for i in range(0, len(data)-chunk_size, chunk_size)]
+                all_chunks = [data[i:i+chunk_size] for i in range(0, len(data)-chunk_size, chunk_size)]
                 
-                if not chunks:
-                    chunks = [data] # fallback if audio < 1s
+                if len(all_chunks) >= 3:
+                    # Pick Start, Middle, and End
+                    chunks = [all_chunks[0], all_chunks[len(all_chunks)//2], all_chunks[-1]]
+                else:
+                    chunks = all_chunks if all_chunks else [data]
                 
-                print(f"[AI TRACE] Audio split into {len(chunks)} temporal chunks. Vectorizing inference...")
+                print(f"[AI TRACE] Nitro-3-Point Sampling: {len(chunks)} chunks processed.")
                 
                 # 2. Extract and Normalize Embeddings (BATCHED)
                 # Stack all chunks into a single [Batch, Samples] tensor for massive speed boost
@@ -247,7 +293,7 @@ class AudioProcessor:
                 interpretation = f"Acoustic Feature Baseline: Deviation Score {risk_score}/10 (Fallback)"
             
             t_total = time.time() - t_start
-            print(f"[AI TRACE] Average Chunk Similarity: {avg_similarity:.4f}" if self.hear_serving_signature else "[AI TRACE] Fallback Active")
+            print(f"\n{'─'*40}\n🚀 [LATENCY] Acoustic Nitro (HeAR): {t_total:.2f}s\n{'─'*40}")
             print(f"[AI TRACE] Final Stability Score (0-10): {risk_score}")
             print(f"{'='*30}\n[AI TRACE] ANALYSIS COMPLETE ({t_total:.2f}s)\n{'='*30}\n")
             

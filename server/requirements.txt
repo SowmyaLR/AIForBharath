@@ -16,5 +16,7 @@ tensorflow
 huggingface_hub
 scikit-learn
 requests
+hf-transfer
+pydub
 boto3
 python-dotenv

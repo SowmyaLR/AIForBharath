@@ -12,6 +12,25 @@ export const triageRepository = {
         return response.data;
     },
 
+    createVitalsTriage: async (formData: FormData, idempotencyKey?: string): Promise<TriageRecord> => {
+        const response = await apiClient.post<TriageRecord>('/triage/vitals', formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+                ...(idempotencyKey ? { 'X-Idempotency-Key': idempotencyKey } : {}),
+            },
+        });
+        return response.data;
+    },
+
+    uploadAudio: async (id: string, formData: FormData): Promise<TriageRecord> => {
+        const response = await apiClient.post<TriageRecord>(`/triage/audio/${id}`, formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+            },
+        });
+        return response.data;
+    },
+
     getQueue: async (specialty?: string): Promise<TriageRecord[]> => {
         const response = await apiClient.get<TriageRecord[]>('/triage/queue', {
             params: { specialty },

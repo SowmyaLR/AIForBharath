@@ -45,6 +45,8 @@ class TriageRecord(BaseModel):
     risk_score: int = 0
     triage_tier: str = "ROUTINE"
     preliminary_zone: Optional[str] = None  # vitals-only fast estimate before AI completes
+    preliminary_precautions: List[str] = [] # MedGemma-generated first-aid for nurse
+    vitals_status: str = "STABLE"           # "STABLE" or "ABNORMAL"
     specialty: str = "General Medicine"
     patient_age: Optional[int] = None
     status: str

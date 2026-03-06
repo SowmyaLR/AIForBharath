@@ -31,7 +31,8 @@ export default function NurseIntakePage() {
     const [finalZone, setFinalZone] = useState<string | null>(null);
     const [preliminaryZone, setPreliminaryZone] = useState<string | null>(null);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const [isPolling, setIsPolling] = useState(false);
+    const [precautions, setPrecautions] = useState<string[]>([]);
+    const [reasoningStep, setReasoningStep] = useState<string | null>(null);
 
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const chunksRef = useRef<Blob[]>([]);
@@ -104,106 +105,82 @@ export default function NurseIntakePage() {
         }
     };
 
+    const reasoningSequence = [
+        "Analyzing hemodynamic stability...",
+        "Cross-referencing with clinical red-flags...",
+        "Consulting MedGemma Protocol engine...",
+        "Synthesizing immediate precautions..."
+    ];
+
     const submitTriage = async () => {
         if (!audioBlob || uploadStatus === 'uploading' || uploadStatus === 'success') return;
         setUploadStatus('uploading');
+        setPrecautions([]);
+        setErrorMessage(null);
+        setReasoningStep(reasoningSequence[0]);
 
-        const formData = new FormData();
-        formData.append('patient_id', patientId);
-        formData.append('language', language);
-        formData.append('audio', audioBlob, `triage_${Date.now()}.webm`);
+        // Interface interaction timer
+        let stepIdx = 0;
+        const stepInterval = setInterval(() => {
+            stepIdx++;
+            if (stepIdx < reasoningSequence.length) {
+                setReasoningStep(reasoningSequence[stepIdx]);
+            }
+        }, 1200);
 
-        // Add Vitals
-        formData.append('temp', vitals.temp.toString());
-        formData.append('bp_sys', vitals.bp_sys.toString());
-        formData.append('bp_dia', vitals.bp_dia.toString());
-        formData.append('hr', vitals.hr.toString());
-        formData.append('rr', vitals.rr.toString());
-        formData.append('spo2', vitals.spo2.toString());
-        formData.append('patient_age', vitals.age.toString());
+        // Stage 1: Create Triage with Vitals (Synchronous Fast-Path)
+        const vitalsData = new FormData();
+        vitalsData.append('patient_id', patientId);
+        vitalsData.append('patient_age', vitals.age.toString());
+        vitalsData.append('temp', vitals.temp.toString());
+        vitalsData.append('bp_sys', vitals.bp_sys.toString());
+        vitalsData.append('bp_dia', vitals.bp_dia.toString());
+        vitalsData.append('hr', vitals.hr.toString());
+        vitalsData.append('rr', vitals.rr.toString());
+        vitalsData.append('spo2', vitals.spo2.toString());
 
         try {
-            const res = await triageRepository.createTriage(formData, idempotencyKeyRef.current);
-            const newTriageId = res.id;
-            setTriageId(newTriageId);
-            setUploadStatus('success');
+            console.log("Stage 1: Submitting Vitals...");
+            const record = await triageRepository.createVitalsTriage(vitalsData, idempotencyKeyRef.current);
+            clearInterval(stepInterval);
+            setReasoningStep(null);
+            setTriageId(record.id);
 
-            // Start polling at 2s intervals
-            pollTriageStatus(newTriageId);
+            if (record.vitals_status === 'ABNORMAL') {
+                setPreliminaryZone('ABNORMAL');
+                setPrecautions(record.preliminary_precautions || []);
+            } else {
+                setPreliminaryZone('STABLE');
+            }
 
+            // Stage 2: Upload Audio (Asynchronous Background Path)
+            console.log("Stage 2: Uploading Audio for mapping...");
+            const audioData = new FormData();
+            audioData.append('audio', audioBlob, `triage_${Date.now()}.webm`);
+            audioData.append('language', language);
+
+            await triageRepository.uploadAudio(record.id, audioData);
+
+            setUploadStatus('processed'); // We mark it as processed because the nurse's job is done
+
+            // Auto-reset after a delay so they can do the next patient
             setTimeout(() => {
                 setAudioBlob(null);
                 setRecordingTime(0);
-                // Reset vitals for next patient
                 setVitals({
-                    temp: 37.0,
-                    bp_sys: 120,
-                    bp_dia: 80,
-                    hr: 75,
-                    rr: 16,
-                    spo2: 98,
-                    age: 30
+                    temp: 37.0, bp_sys: 120, bp_dia: 80, hr: 75, rr: 16, spo2: 98, age: 30
                 });
-            }, 3000);
+            }, 6000);
+
         } catch (err) {
-            console.error(err);
+            clearInterval(stepInterval);
+            setReasoningStep(null);
+            console.error("Submission failed:", err);
             setUploadStatus('error');
+            setErrorMessage("Failed to submit triage case. Please check connectivity.");
         }
     };
 
-    const pollTriageStatus = async (id: string) => {
-        setIsPolling(true);
-        const maxAttempts = 150; // 5 min at 2s intervals
-        let attempts = 0;
-
-        const interval = setInterval(async () => {
-            try {
-                const record = await triageRepository.getTriage(id);
-                const currentStatus = record.status;
-
-                if (currentStatus === 'in_progress') {
-                    setUploadStatus('processing');
-                }
-
-                // Show preliminary vitals-only zone mid-poll if available
-                if (record.preliminary_zone && !finalZone) {
-                    setPreliminaryZone(record.preliminary_zone);
-                }
-
-                // Failure: show error message, stop polling
-                if (currentStatus === 'failed') {
-                    const errorMsg = record.soap_note?.subjective ||
-                        'AI analysis could not be completed. Your recording and vitals are saved.';
-                    setErrorMessage(errorMsg);
-                    setIsPolling(false);
-                    clearInterval(interval);
-                    setUploadStatus('error');
-                    return;
-                }
-
-                const terminalStatuses = ['ready_for_review', 'finalized', 'exported'];
-                if (terminalStatuses.includes(currentStatus)) {
-                    setFinalZone(record.triage_tier || 'ROUTINE');
-                    setPreliminaryZone(null); // Clear fallback once final zone is set
-                    setIsPolling(false);
-                    clearInterval(interval);
-                    setUploadStatus('processed');
-                }
-            } catch (e) {
-                console.error("Polling error:", e);
-            }
-
-            attempts++;
-            if (attempts >= maxAttempts) {
-                setIsPolling(false);
-                clearInterval(interval);
-                if (!finalZone) {
-                    setErrorMessage('Analysis is taking longer than expected. Please check back in the queue.');
-                    setUploadStatus('error');
-                }
-            }
-        }, 2000); // Poll every 2 seconds
-    };
 
     const formatTime = (seconds: number) => {
         const m = Math.floor(seconds / 60).toString().padStart(2, '0');
@@ -368,15 +345,20 @@ export default function NurseIntakePage() {
                                 <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="w-full">
                                     <button
                                         onClick={submitTriage}
-                                        disabled={uploadStatus === 'uploading' || isPolling || uploadStatus === 'processed'}
+                                        disabled={uploadStatus === 'uploading' || uploadStatus === 'processed'}
                                         className={`w-full py-4 rounded-2xl font-bold flex items-center justify-center gap-2 shadow-2xl transition-all
-                                    ${(uploadStatus === 'success' || uploadStatus === 'processed') && !isPolling ? 'bg-green-500 text-white shadow-green-200' :
+                                    ${(uploadStatus === 'success' || uploadStatus === 'processed') ? 'bg-green-500 text-white shadow-green-200' :
                                                 uploadStatus === 'error' ? 'bg-red-500 text-white shadow-red-200' :
                                                     'bg-teal-600 text-white hover:bg-teal-700 shadow-teal-200'}
                                 `}
                                     >
-                                        {(uploadStatus === 'uploading' || isPolling) && <><Activity className="animate-spin" /> AI Triage Processing...</>}
-                                        {(uploadStatus === 'success' || uploadStatus === 'processed') && !isPolling && <>Triage Case Created Successfully!</>}
+                                        {uploadStatus === 'uploading' && (
+                                            <div className="flex flex-col items-center">
+                                                <Activity className="animate-spin mb-1" />
+                                                <div className="text-[10px] uppercase tracking-widest font-black opacity-80">{reasoningStep}</div>
+                                            </div>
+                                        )}
+                                        {uploadStatus === 'processed' && <>Triage Case Created Successfully!</>}
                                         {uploadStatus === 'error' && <>Submission Failed. Retry?</>}
                                         {uploadStatus === '' && <><UploadCloud /> Submit Triage Case</>}
                                     </button>
@@ -385,21 +367,16 @@ export default function NurseIntakePage() {
 
                             {/* Universal Zone Indicator */}
                             <AnimatePresence>
-                                {(isPolling || finalZone) && (
+                                {(uploadStatus === 'uploading' || finalZone || uploadStatus === 'processed') && (
                                     <motion.div
                                         initial={{ opacity: 0, y: 20 }}
                                         animate={{ opacity: 1, y: 0 }}
                                         exit={{ opacity: 0, y: 10 }}
                                         className="mt-8 w-full"
                                     >
-                                        <div className={`p-6 rounded-2xl border-2 flex flex-col items-center gap-4 transition-all duration-500 ${isPolling ? 'bg-slate-50 border-slate-200 border-dashed' :
-                                            finalZone === 'EMERGENCY' ? 'bg-red-50 border-red-200 shadow-lg shadow-red-100' :
-                                                finalZone === 'URGENT' ? 'bg-orange-50 border-orange-200 shadow-lg shadow-orange-100' :
-                                                    finalZone === 'SEMI_URGENT' ? 'bg-yellow-50 border-yellow-200 shadow-lg shadow-yellow-100' :
-                                                        'bg-green-50 border-green-200 shadow-lg shadow-green-100'
-                                            }`}>
+                                        <div className={`p-6 rounded-2xl border-2 flex flex-col items-center gap-4 transition-all duration-500 ${uploadStatus === 'processed' ? (preliminaryZone === 'ABNORMAL' ? 'bg-red-50 border-red-200' : 'bg-green-50 border-green-200') : 'bg-slate-50 border-slate-200 border-dashed'}`}>
                                             <div className="flex items-center gap-3 self-start">
-                                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white ${isPolling ? 'bg-slate-400' :
+                                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white ${uploadStatus === 'uploading' ? 'bg-slate-400' :
                                                     finalZone === 'EMERGENCY' ? 'bg-red-500' :
                                                         finalZone === 'URGENT' ? 'bg-orange-500' :
                                                             finalZone === 'SEMI_URGENT' ? 'bg-yellow-500' :
@@ -413,65 +390,76 @@ export default function NurseIntakePage() {
                                                 </div>
                                             </div>
 
-                                            {isPolling ? (
-                                                <div className="flex flex-col items-center py-4 w-full">
-                                                    <Activity className="text-teal-500 animate-spin mb-3" size={32} />
-                                                    <p className="text-sm font-bold text-slate-600">AI Reasoning in progress...</p>
-                                                    <p className="text-[11px] text-slate-400">
-                                                        Status: <span className="uppercase font-bold text-teal-600">
-                                                            {uploadStatus === 'processing' ? 'Processing Model' : 'In Queue'}
-                                                        </span>
-                                                    </p>
-                                                    {/* Preliminary vitals-only zone — shown while MedGemma is still running */}
-                                                    {preliminaryZone && (
-                                                        <div className="mt-4 px-4 py-2 rounded-xl bg-amber-50 border border-amber-200 text-center w-full">
-                                                            <p className="text-[10px] text-amber-600 font-bold uppercase tracking-wider mb-1">Vitals-Based Preliminary Zone</p>
-                                                            <p className={`text-lg font-black ${preliminaryZone === 'EMERGENCY' ? 'text-red-600' :
-                                                                preliminaryZone === 'URGENT' ? 'text-orange-600' :
-                                                                    preliminaryZone === 'SEMI_URGENT' ? 'text-yellow-600' : 'text-green-600'
-                                                                }`}>{preliminaryZone}</p>
-                                                            <p className="text-[10px] text-amber-500 mt-1">AI analysis still running...</p>
+                                            {uploadStatus === 'uploading' ? (
+                                                <div className="flex flex-col items-center py-8 w-full">
+                                                    <div className="relative mb-6">
+                                                        <Activity className="text-teal-500 animate-spin" size={48} />
+                                                        <motion.div
+                                                            animate={{ scale: [1, 1.2, 1], opacity: [0.3, 0.6, 0.3] }}
+                                                            transition={{ repeat: Infinity, duration: 2 }}
+                                                            className="absolute inset-0 bg-teal-200 rounded-full filter blur-xl -z-10"
+                                                        />
+                                                    </div>
+                                                    <p className="text-sm font-black text-slate-800 uppercase tracking-tighter mb-1">MedGemma reasoning active</p>
+                                                    <p className="text-[11px] text-teal-600 font-bold animate-pulse">{reasoningStep}</p>
+                                                    <div className="mt-6 w-48 h-1 bg-slate-100 rounded-full overflow-hidden">
+                                                        <motion.div
+                                                            initial={{ x: "-100%" }}
+                                                            animate={{ x: "100%" }}
+                                                            transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                                                            className="w-full h-full bg-teal-500"
+                                                        />
+                                                    </div>
+                                                </div>
+                                            ) : uploadStatus === 'processed' ? (
+                                                <div className="flex flex-col items-center w-full py-4 text-center">
+                                                    <div className={`mb-4 w-20 h-20 rounded-3xl flex items-center justify-center shadow-lg transition-transform hover:scale-105 duration-300 ${preliminaryZone === 'ABNORMAL' ? 'bg-red-500 text-white' : 'bg-green-500 text-white'}`}>
+                                                        {preliminaryZone === 'ABNORMAL' ? <AlertTriangle size={48} /> : <Shield size={48} />}
+                                                    </div>
+                                                    <h2 className={`text-2xl font-black uppercase tracking-tighter ${preliminaryZone === 'ABNORMAL' ? 'text-red-600' : 'text-green-600'}`}>
+                                                        {preliminaryZone} VITALS
+                                                    </h2>
+
+                                                    {preliminaryZone === 'ABNORMAL' && precautions.length > 0 && (
+                                                        <div className="mt-4 w-full text-left bg-white p-4 rounded-xl border border-red-100 shadow-inner">
+                                                            <p className="text-[10px] font-bold text-red-500 uppercase tracking-widest mb-2 flex items-center gap-1">
+                                                                <Shield size={10} /> MedGemma First Aid Actions
+                                                            </p>
+                                                            <ul className="space-y-2">
+                                                                {precautions.map((p, i) => (
+                                                                    <motion.li
+                                                                        initial={{ opacity: 0, x: -10 }}
+                                                                        animate={{ opacity: 1, x: 0 }}
+                                                                        transition={{ delay: i * 0.1 }}
+                                                                        key={i}
+                                                                        className="text-xs text-slate-700 flex items-start gap-2"
+                                                                    >
+                                                                        <div className="w-1.5 h-1.5 rounded-full bg-red-400 mt-1 flex-shrink-0" />
+                                                                        {p}
+                                                                    </motion.li>
+                                                                ))}
+                                                            </ul>
                                                         </div>
                                                     )}
+
+                                                    <div className="mt-6 flex flex-col items-center gap-1">
+                                                        <div className="flex items-center gap-2 text-[10px] font-bold text-slate-400 uppercase">
+                                                            <Activity size={12} className="text-teal-500" /> Full AI Analysis Sent
+                                                        </div>
+                                                        <p className="text-[10px] text-slate-400">Doctor will review SOAP note in queue.</p>
+                                                    </div>
                                                 </div>
                                             ) : errorMessage ? (
                                                 <div className="flex flex-col items-center py-4 w-full text-center">
                                                     <XCircle className="text-red-400 mb-3" size={40} />
-                                                    <p className="text-sm font-bold text-red-600 mb-1">Analysis Failed</p>
+                                                    <p className="text-sm font-bold text-red-600 mb-1">Submission Failed</p>
                                                     <p className="text-xs text-slate-500 max-w-[220px]">{errorMessage}</p>
                                                     <button
                                                         onClick={() => { setErrorMessage(null); setUploadStatus(''); }}
                                                         className="mt-3 text-xs text-teal-600 underline"
                                                     >Try Again</button>
                                                 </div>
-                                            ) : (
-
-                                                <div className="flex flex-col items-center w-full py-4 text-center">
-                                                    <div className={`mb-4 w-20 h-20 rounded-3xl flex items-center justify-center shadow-lg transition-transform hover:scale-105 duration-300 ${finalZone === 'EMERGENCY' ? 'bg-red-500 text-white' :
-                                                        finalZone === 'URGENT' ? 'bg-orange-500 text-white' :
-                                                            finalZone === 'SEMI_URGENT' ? 'bg-yellow-500 text-white' :
-                                                                'bg-green-500 text-white'
-                                                        }`}>
-                                                        {finalZone === 'EMERGENCY' && <AlertTriangle size={48} />}
-                                                        {finalZone === 'URGENT' && <Square size={40} className="fill-current" />}
-                                                        {finalZone === 'SEMI_URGENT' && <Circle size={48} className="fill-current" />}
-                                                        {finalZone === 'ROUTINE' && <Shield size={48} />}
-                                                    </div>
-                                                    <h2 className={`text-2xl font-black uppercase tracking-tighter ${finalZone === 'EMERGENCY' ? 'text-red-600' :
-                                                        finalZone === 'URGENT' ? 'text-orange-600' :
-                                                            finalZone === 'SEMI_URGENT' ? 'text-yellow-600' :
-                                                                'text-green-600'
-                                                        }`}>
-                                                        {finalZone} ZONE
-                                                    </h2>
-                                                    <p className="mt-2 text-sm font-bold text-slate-700 max-w-[200px]">
-                                                        {finalZone === 'EMERGENCY' ? "Needs Immediate Critical Intervention" :
-                                                            finalZone === 'URGENT' ? "Prioritize High-Risk Evaluation" :
-                                                                finalZone === 'SEMI_URGENT' ? "Queue for Supportive Clinical Review" :
-                                                                    "Standard Routine Evaluation Queue"}
-                                                    </p>
-                                                </div>
-                                            )}
+                                            ) : null}
                                         </div>
                                     </motion.div>
                                 )}

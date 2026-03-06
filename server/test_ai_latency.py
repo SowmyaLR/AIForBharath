@@ -34,24 +34,21 @@ def test_latency():
 
     print(f"--- 🎤 Testing with file: {audio_file} ({len(audio_bytes)/1024:.2f} KB) ---")
 
-    # 3. Test Transcription (Whisper Medium)
-    print("\n--- 📝 Running Transcription (Whisper Medium) ---")
-    start_transcribe = time.time()
+    # 3. Phase 1: Serialized Whisper + HeAR (Nitro Optimization)
+    print("\n--- 📝 Phase 1: Serialized Whisper + HeAR ---")
+    start_p1 = time.time()
+    
+    # 1. Whisper first
     transcript = processor.transcribe(audio_bytes, "english")
-    transcribe_time = time.time() - start_transcribe
-    print(f"✅ Transcription complete in {transcribe_time:.2f}s")
-    print(f"Transcript snippet: {transcript[:100]}...")
-
-    # 4. Test Acoustic Analysis (HeAR Vectorized)
-    print("\n--- 🧬 Running Acoustic Analysis (HeAR Vectorized) ---")
-    start_detect = time.time()
+    
+    # 2. HeAR second (Now with 3-point sampling)
     anomalies = processor.detect_anomalies(audio_bytes)
-    detect_time = time.time() - start_detect
-    print(f"✅ Acoustic Analysis complete in {detect_time:.2f}s")
-
-    # 5. Test SOAP Note Generation (Phase 2)
-    print("\n--- 🏥 Running SOAP Note Generation (Phase 2: MedGemma) ---")
-    # Mocking some vitals and age for the prompt
+    
+    p1_time = time.time() - start_p1
+    print(f"✅ Phase 1 complete in {p1_time:.2f}s")
+    
+    # 4. Phase 2: SOAP Note Generation
+    print("\n--- 🏥 Phase 2: SOAP Note Generation ---")
     mock_vitals = {
         "temperature": 38.5,
         "blood_pressure_systolic": 130,
@@ -61,19 +58,17 @@ def test_latency():
     }
     mock_age = 45
     
-    start_soap = time.time()
+    start_p2 = time.time()
     soap_result = processor.generate_soap_note(transcript, anomalies, mock_vitals, mock_age)
-    soap_time = time.time() - start_soap
-    print(f"✅ SOAP Note Generation complete in {soap_time:.2f}s")
-    print(f"Result Tier: {soap_result.get('triage_tier')}")
+    p2_time = time.time() - start_p2
+    print(f"✅ Phase 2 complete in {p2_time:.2f}s")
 
-    # 6. Summary
+    # 5. Summary
     print("\n" + "="*50)
-    print(f"  LOCAL PERFORMANCE SUMMARY")
-    print(f"  Total E2E Latency:   {transcribe_time + detect_time + soap_time:.2f}s")
-    print(f"  - Transcription:     {transcribe_time:.2f}s")
-    print(f"  - Acoustic (Nitro):  {detect_time:.2f}s")
-    print(f"  - SOAP Note (AI):    {soap_time:.2f}s")
+    print(f"  LOCAL PERFORMANCE SUMMARY (REFLECTING PRODUCTION)")
+    print(f"  Total E2E Latency : {p1_time + p2_time:.2f}s")
+    print(f"  Phase 1 (Parallel): {p1_time:.2f}s")
+    print(f"  Phase 2 (AI)      : {p2_time:.2f}s")
     print("="*50)
 
 if __name__ == "__main__":

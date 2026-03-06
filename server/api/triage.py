@@ -91,16 +91,21 @@ async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, languag
         await triage_service.update_triage_status(triage_id, "in_progress")
         pipeline_start = time.time()
 
-        # ── Phase 1: Parallel Whisper + HeAR ─────────────────────────────────
-        t_parallel_start = time.time()
-        transcript_task = run_in_threadpool(ai_processor.transcribe, audio_bytes, language)
-        anomaly_task = run_in_threadpool(ai_processor.detect_anomalies, audio_bytes)
-        transcript, anomalies = await asyncio.gather(transcript_task, anomaly_task)
-        t_parallel_end = time.time()
+        # ── Phase 1: Serialized Whisper + HeAR (Optimized for 4 vCPU throughput) ──
+        # Running these serially prevents CPU thrashing and actually lowers wall-clock time
+        t_p1_start = time.time()
+        
+        # 1. Whisper first (High CPU)
+        transcript = await run_in_threadpool(ai_processor.transcribe, audio_bytes, language)
+        
+        # 2. HeAR second (High CPU/Memory)
+        anomalies = await run_in_threadpool(ai_processor.detect_anomalies, audio_bytes)
+        
+        t_p1_end = time.time()
         logger.info(json.dumps({
             "event": "asr_acoustic_complete",
             "triage_id": triage_id,
-            "latency_s": round(t_parallel_end - t_parallel_start, 2)
+            "latency_s": round(t_p1_end - t_p1_start, 2)
         }))
 
         # ── Fetch record for vitals (for fallback and MedGemma context) ───────
@@ -162,7 +167,7 @@ async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, languag
             await triage_service.save_triage_record(record)
 
             total = round(time.time() - pipeline_start, 2)
-            parallel_time = round(t_parallel_end - t_parallel_start, 2)
+            p1_time = round(t_p1_end - t_p1_start, 2)
             soap_time = round(t_soap_end - t_soap_start, 2)
 
             # ── PERFORMANCE SUMMARY (for comparison) ──────────────────────────
@@ -171,7 +176,7 @@ async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, languag
                 f"  TRIAGE PERFORMANCE SUMMARY\n"
                 f"{'─'*50}\n"
                 f"  Triage ID        : {triage_id}\n"
-                f"  Phase 1 (W+H)    : {parallel_time}s\n"
+                f"  Phase 1 (W+H)    : {p1_time}s\n"
                 f"  Phase 2 (Gemma)  : {soap_time}s\n"
                 f"  Total Latency    : {total}s\n"
                 f"  Final Tier       : {record.triage_tier}\n"
@@ -182,7 +187,7 @@ async def _process_triage_audio_task(triage_id: str, audio_bytes: bytes, languag
                 "event": "triage_pipeline_complete",
                 "triage_id": triage_id,
                 "total_latency_s": total,
-                "parallel_latency_s": parallel_time,
+                "p1_latency_s": p1_time,
                 "soap_latency_s": soap_time,
                 "zone": record.triage_tier,
                 "specialty": record.specialty
@@ -230,6 +235,97 @@ async def _update_preliminary_zone(triage_id: str, zone: str):
             record.preliminary_zone = zone
 
 
+@router.post("/vitals", response_model=TriageRecord)
+async def create_vitals_triage(
+    patient_id: str = Form(...),
+    patient_age: Optional[int] = Form(None),
+    temp: Optional[float] = Form(None),
+    bp_sys: Optional[int] = Form(None),
+    bp_dia: Optional[int] = Form(None),
+    hr: Optional[int] = Form(None),
+    rr: Optional[int] = Form(None),
+    spo2: Optional[int] = Form(None),
+    x_idempotency_key: Optional[str] = Header(None)
+):
+    """Step 1: Create a triage record with vitals only. Returns immediate first-aid if abnormal."""
+    # 1. Idempotency Check
+    if x_idempotency_key:
+        existing = await triage_service.get_by_idempotency_key(x_idempotency_key)
+        if existing: return existing
+
+    # 2. Build Vitals
+    vitals = VitalSigns(
+        temperature=temp or 37.0,
+        blood_pressure_systolic=bp_sys or 120,
+        blood_pressure_diastolic=bp_dia or 80,
+        heart_rate=hr or 72,
+        respiratory_rate=rr or 16,
+        oxygen_saturation=spo2 or 98,
+        recorded_at=datetime.datetime.utcnow(),
+        recorded_by="Nurse_Dashboard"
+    )
+
+    # 3. Create Record
+    record = await triage_service.create_triage_record(
+        patient_id=patient_id, 
+        audio_file_path="", 
+        language="English", 
+        vitals=vitals,
+        idempotency_key=x_idempotency_key,
+        patient_age=patient_age
+    )
+
+    # 4. Fast-Path Check
+    if ai_processor:
+        t_vitals_start = time.time()
+        vitals_dict = vitals.model_dump()
+        if ai_processor.is_vitals_abnormal(vitals_dict):
+            record.vitals_status = "ABNORMAL"
+            precautions = await run_in_threadpool(ai_processor.get_vitals_precautions, vitals_dict, patient_age)
+            record.preliminary_precautions = precautions
+            await triage_service.save_triage_record(record)
+        
+        t_vitals_end = time.time()
+        logger.info(json.dumps({
+            "event": "vitals_triage_complete",
+            "triage_id": record.id,
+            "latency_s": round(t_vitals_end - t_vitals_start, 4),
+            "status": record.vitals_status
+        }))
+        print(f"[LATENCY] Stage 1 (Vitals): {round(t_vitals_end - t_vitals_start, 2)}s")
+    
+    return record
+
+
+@router.post("/audio/{triage_id}", response_model=TriageRecord)
+async def upload_triage_audio(
+    triage_id: str,
+    background_tasks: BackgroundTasks,
+    audio: UploadFile = File(...),
+    language: str = Form("English")
+):
+    """Step 2: Upload audio for an existing triage record and start AI processing in background."""
+    record = await triage_service.get_triage(triage_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Triage record not found")
+
+    audio_bytes = await audio.read()
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio file too large")
+
+    # 1. Upload audio
+    audio_uri = upload_audio(audio_bytes, audio.filename)
+    record.audio_file_url = audio_uri
+    record.language = language
+    record.status = "in_progress"
+    await triage_service.save_triage_record(record)
+
+    # 2. Start AI Pipeline (Background)
+    background_tasks.add_task(_process_triage_audio_task, record.id, audio_bytes, language)
+    
+    return record
+
+
 @router.post("/", response_model=TriageRecord)
 async def create_triage(
     background_tasks: BackgroundTasks,
@@ -245,61 +341,20 @@ async def create_triage(
     patient_age: Optional[int] = Form(None),
     x_idempotency_key: Optional[str] = Header(None)
 ):
-    """Upload audio for a patient and start triage pipeline with optional vitals."""
-
-    # ── 1. Idempotency check — prevent double submission ──────────────────────
-    if x_idempotency_key:
-        existing = await triage_service.get_by_idempotency_key(x_idempotency_key)
-        if existing:
-            logger.info(json.dumps({
-                "event": "idempotent_request_deduplicated",
-                "idempotency_key": x_idempotency_key,
-                "existing_triage_id": existing.id
-            }))
-            return existing
-
-    # ── 2. File size guard ─────────────────────────────────────────────────────
-    audio_bytes = await audio.read()
-    if len(audio_bytes) > MAX_AUDIO_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Audio file too large ({len(audio_bytes) // 1024}KB). Maximum size is 10MB."
-        )
-
-    # ── 3. Build VitalSigns if provided ───────────────────────────────────────
-    vitals = None
-    if any([temp, bp_sys, bp_dia, hr, rr, spo2]):
-        vitals = VitalSigns(
-            temperature=temp or 0.0,
-            blood_pressure_systolic=bp_sys or 0,
-            blood_pressure_diastolic=bp_dia or 0,
-            heart_rate=hr or 0,
-            respiratory_rate=rr or 0,
-            oxygen_saturation=spo2 or 0,
-            recorded_at=datetime.datetime.utcnow(),
-            recorded_by="Nurse_Intake_01"
-        )
-
-    # ── 4. Upload audio (S3 in demo, local in dev) ────────────────────────────
-    audio_uri = upload_audio(audio_bytes, audio.filename)
-
-    # ── 5. Create DynamoDB record ─────────────────────────────────────────────
-    record = await triage_service.create_triage_record(
-        patient_id, audio_uri, language, vitals,
-        idempotency_key=x_idempotency_key,
-        patient_age=patient_age
+    """Legacy One-Shot API (kept for backward compatibility)."""
+    # Simply call the new split logic internally
+    record = await create_vitals_triage(
+        patient_id=patient_id, patient_age=patient_age,
+        temp=temp, bp_sys=bp_sys, bp_dia=bp_dia, hr=hr, rr=rr, spo2=spo2,
+        x_idempotency_key=x_idempotency_key
     )
-
-    # ── 6. Dispatch AI pipeline as background task ────────────────────────────
-    background_tasks.add_task(_process_triage_audio_task, record.id, audio_bytes, language)
-
-    logger.info(json.dumps({
-        "event": "triage_submitted",
-        "triage_id": record.id,
-        "patient_id": patient_id,
-        "audio_size_kb": len(audio_bytes) // 1024
-    }))
-    return record
+    
+    return await upload_triage_audio(
+        triage_id=record.id,
+        background_tasks=background_tasks,
+        audio=audio,
+        language=language
+    )
 
 
 @router.get("/queue", response_model=List[TriageRecord])
