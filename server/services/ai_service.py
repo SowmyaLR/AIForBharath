@@ -119,8 +119,8 @@ class AudioProcessor:
         # 1. Initialize Whisper Model (faster-whisper)
         print("Loading ASR model (faster-whisper medium)...")
         # Use CPU with int8 quantization for high performance on both CPU and Apple Silicon
-        # 'auto' will choose the best device available.
-        self.asr_model = WhisperModel("medium", device="auto", compute_type="int8")
+        # cpu_threads=4 matches our ECS Fargate 4 vCPU configuration for max efficiency
+        self.asr_model = WhisperModel("medium", device="auto", compute_type="int8", cpu_threads=4)
         
         # 2. Initialize HeAR (Official Keras)
         print("Loading HeAR model (HuggingFace)...")
@@ -175,14 +175,17 @@ class AudioProcessor:
             t_asr_start = time.time()
             
             # faster-whisper transcribe returns a generator of segments
+            # OPTIMIZATION: beam_size=1 (greedy) is much faster on CPU than beam search
+            # OPTIMIZATION: vad_filter=True skips silence to save processing cycles
             segments, info = self.asr_model.transcribe(
                 data,
                 task=task,
                 language=whisper_lang,
-                beam_size=5,
+                beam_size=1,
                 repetition_penalty=1.1,
                 no_repeat_ngram_size=3,
-                condition_on_previous_text=False # prevents hallucinations
+                condition_on_previous_text=False,
+                vad_filter=True
             )
             
             # Collect text from segments
