@@ -6,6 +6,11 @@ VaidyaSaarathi is a technically curated, privacy-first **Clinical Decision Suppo
 
 ---
 
+## Demo Video
+
+[![Watch the demo](https://img.youtube.com/vi/tJfe5zWGTV4/0.jpg)](https://www.youtube.com/watch?v=tJfe5zWGTV4)
+
+
 ## � Purpose & Clinical Impact
 
 ### Why VaidyaSaarathi Exists
