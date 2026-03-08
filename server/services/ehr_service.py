@@ -2,8 +2,10 @@ import os
 import requests
 import json
 import logging
+import re
 from datetime import datetime
 import uuid
+import time
 from typing import Dict, Any, List, Optional
 from .triage_service import TriageRecord
 
@@ -13,6 +15,7 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 APP_ENV = os.getenv("APP_ENV", "dev")
 AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 SAGEMAKER_MEDGEMMA_ENDPOINT = os.getenv("SAGEMAKER_MEDGEMMA_ENDPOINT", "")
+SAGEMAKER_ASYNC_BUCKET = os.getenv("SAGEMAKER_ASYNC_BUCKET", "")
 FHIR_S3_BUCKET = os.getenv("FHIR_S3_BUCKET", "")
 
 if APP_ENV == "demo":
@@ -121,68 +124,124 @@ class EHRService:
             return self.generate_fhir_bundle_deterministic(record)
 
     def _extract_json_robust(self, text: str) -> Dict[str, Any]:
-        """Robustly extracts the first valid JSON object from LLM output."""
+        """Robustly extracts and cleans the first valid JSON object from LLM output."""
         if not text:
             raise ValueError("Empty response from AI")
 
-        # 1. Try pure parse first
+        # 1. Basic cleaning
         text = text.strip()
-        try:
-            return json.loads(text)
-        except:
-            pass
-
-        # 2. Extract content starting from first '{'
-        # Clean control characters (except tab/newline)
+        
+        # 2. Advanced cleaning: 
+        # A. Remove non-printable control characters (0x00-0x1F) that break json.loads
+        # We preserve \n (0x0A), \r (0x0D), and \t (0x09) but escape them if they are inside strings 
+        # (or just strip them if they are unintended).
+        # Simplest approach: remove all control characters except \n, \r, \t
         text = "".join(ch for ch in text if ch >= ' ' or ch in '\n\r\t')
         
+        # B. Remove comments and trailing commas which break standard json.loads
+        # Remove single-line comments //
+        text = re.sub(r'//.*?\n', '\n', text)
+        # Remove multi-line comments /* */
+        text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+        # Remove trailing commas in objects/arrays
+        text = re.sub(r',\s*([\]}])', r'\1', text)
+
+        # 3. Use outermost { } as the search boundary
         start_idx = text.find('{')
-        if start_idx == -1:
-            raise ValueError("No JSON object starting character '{' found in response")
+        end_idx = text.rfind('}')
+        
+        if start_idx == -1 or end_idx == -1:
+            logger.error(f"[EHR] No JSON object found in text: {text[:500]}...")
+            raise ValueError("No valid JSON structure found in response")
 
-        # Find all potential closing braces
-        end_indices = [i for i, ch in enumerate(text) if ch == '}']
-        if not end_indices:
-            raise ValueError("No JSON object closing character '}' found in response")
-
-        # 3. Strategy: Try candidates from the absolute last '}' back to the first '{'
-        # This handles models that append garbage/redundant braces at the end.
-        for end_idx in reversed(end_indices):
-            if end_idx <= start_idx:
-                break
-            
-            candidate = text[start_idx:end_idx+1]
-            try:
-                # Basic cleaning of markdown fences inside the block
-                clean_candidate = candidate.replace("```json", "").replace("```", "").strip()
-                return json.loads(clean_candidate)
-            except json.JSONDecodeError:
-                continue
-
-        # 4. If nothing parsed, reveal why the largest block failed
+        candidate = text[start_idx:end_idx+1]
+        
+        # 4. Final attempt to parse
         try:
-            largest = text[start_idx:end_indices[-1]+1]
-            return json.loads(largest)
+            # Clean possible markdown fences inside our candidate
+            clean_candidate = candidate.replace("```json", "").replace("```", "").strip()
+            return json.loads(clean_candidate)
         except json.JSONDecodeError as e:
-            print(f"[EHR DEBUG] FHIR JSON final parse attempt failed: line {e.lineno}, col {e.colno}: {e.msg}")
+            logger.error(f"[EHR] JSON Parse Error at line {e.lineno}, col {e.colno}: {e.msg}")
+            # Log the problematic area for debugging
+            lines = candidate.splitlines()
+            if 0 <= e.lineno-1 < len(lines):
+                logger.error(f"[EHR] Problematic line: {lines[e.lineno-1]}")
+            
+            # Last ditch: try to use re to find anything that looks like a valid JSON block
+            # This is a bit risky but can work if the model added text *inside* the braces
             raise ValueError(f"JSON parsing failed: {str(e)}")
 
     def _call_inference_backend(self, prompt: str, max_tokens: int = 2048) -> str:
         """Dispatch to SageMaker (demo) or Ollama (dev)."""
         if APP_ENV == "demo" and _sm_runtime and SAGEMAKER_MEDGEMMA_ENDPOINT:
-            print(f"[EHR] Calling SageMaker for FHIR generation: {SAGEMAKER_MEDGEMMA_ENDPOINT}")
-            response = _sm_runtime.invoke_endpoint(
-                EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
-                ContentType="application/json",
-                Body=json.dumps({
-                    "inputs": prompt,
-                    "parameters": {"max_new_tokens": max_tokens, "temperature": 0.1}
-                })
-            )
-            result = json.loads(response["Body"].read().decode("utf-8"))
-            if isinstance(result, list) and result:
-                return result[0].get("generated_text", "")
-            return result.get("generated_text", str(result))
+            print(f"[EHR] Calling SageMaker Async for FHIR generation: {SAGEMAKER_MEDGEMMA_ENDPOINT}")
+            
+            # 1. Prepare Payload with Gemma Chat Template
+            formatted_prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+            payload = {
+                "inputs": formatted_prompt,
+                "parameters": {
+                    "max_new_tokens": max_tokens, 
+                    "temperature": 0.1,
+                    "stop": ["<end_of_turn>", "<eos>"]
+                }
+            }
+            
+            try:
+                request_id = str(uuid.uuid4())
+                if not SAGEMAKER_ASYNC_BUCKET:
+                    logger.error("SAGEMAKER_ASYNC_BUCKET not set in EHR module")
+                    raise ValueError("SAGEMAKER_ASYNC_BUCKET not set")
+
+                input_key = f"fhir-inputs/{request_id}.json"
+                input_location = f"s3://{SAGEMAKER_ASYNC_BUCKET}/{input_key}"
+                
+                _s3.put_object(
+                    Bucket=SAGEMAKER_ASYNC_BUCKET,
+                    Key=input_key,
+                    Body=json.dumps(payload),
+                    ContentType="application/json"
+                )
+
+                # 2. Start Async Inference
+                response = _sm_runtime.invoke_endpoint_async(
+                    EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
+                    ContentType="application/json",
+                    InputLocation=input_location
+                )
+                
+                output_location = response["OutputLocation"]
+                output_bucket = output_location.split("/")[2]
+                output_key = "/".join(output_location.split("/")[3:])
+                
+                print(f"[EHR] Async FHIR request submitted. Output will be at: {output_location}")
+
+                # 3. Poll for Result (up to 15 minutes for cold start)
+                max_retries = 180 # 180 * 5s = 900s (15 minutes)
+                for attempt in range(max_retries):
+                    try:
+                        resp = _s3.get_object(Bucket=output_bucket, Key=output_key)
+                        result = json.loads(resp["Body"].read().decode("utf-8"))
+                        
+                        # Cleanup input
+                        try:
+                            _s3.delete_object(Bucket=SAGEMAKER_ASYNC_BUCKET, Key=input_key)
+                        except: pass
+
+                        if isinstance(result, list) and result:
+                            return result[0].get("generated_text", "")
+                        return result.get("generated_text", str(result))
+                    except _s3.exceptions.NoSuchKey:
+                        if attempt % 6 == 0:
+                            print(f"[EHR] Polling for FHIR result... ({attempt * 5}s elapsed)")
+                        time.sleep(5)
+                
+                raise TimeoutError("Asynchronous FHIR generation timed out.")
+
+            except Exception as e:
+                print(f"[EHR ERROR] SageMaker Async failed: {e}")
+                raise
         else:
             print(f"[EHR] Calling Ollama for FHIR generation")
             response = requests.post(

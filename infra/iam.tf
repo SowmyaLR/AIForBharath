@@ -34,6 +34,34 @@ resource "aws_iam_role_policy_attachment" "s3_read" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
 }
 
+resource "aws_iam_policy" "sagemaker_s3_write" {
+  name        = "${local.name_prefix}-sagemaker-s3-write"
+  description = "Allow SageMaker to write async results"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Effect   = "Allow"
+        Resource = [
+          aws_s3_bucket.async_outputs.arn,
+          "${aws_s3_bucket.async_outputs.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "sagemaker_s3_write_attach" {
+  role       = aws_iam_role.sagemaker_exec.name
+  policy_arn = aws_iam_policy.sagemaker_s3_write.arn
+}
+
 resource "aws_iam_role_policy_attachment" "ecr_read" {
   role       = aws_iam_role.sagemaker_exec.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
