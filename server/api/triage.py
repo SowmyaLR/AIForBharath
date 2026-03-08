@@ -225,7 +225,7 @@ async def _update_preliminary_zone(triage_id: str, zone: str):
             UpdateExpression="SET preliminary_zone = :z, updated_at = :u",
             ExpressionAttributeValues={
                 ":z": zone,
-                ":u": datetime.datetime.utcnow().isoformat()
+                ":u": datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
             }
         )
     else:
@@ -261,7 +261,7 @@ async def create_vitals_triage(
         heart_rate=hr or 72,
         respiratory_rate=rr or 16,
         oxygen_saturation=spo2 or 98,
-        recorded_at=datetime.datetime.utcnow(),
+        recorded_at=datetime.datetime.now(datetime.timezone.utc),
         recorded_by="Nurse_Dashboard"
     )
 
@@ -389,6 +389,14 @@ async def update_soap(triage_id: str, soap_note: SOAPNote):
 @router.post("/{triage_id}/finalize", response_model=TriageRecord)
 async def finalize_triage(triage_id: str):
     record = await triage_service.update_triage_status(triage_id, "finalized")
+    if not record:
+        raise HTTPException(status_code=404, detail="Triage record not found")
+    return record
+
+
+@router.post("/{triage_id}/seen", response_model=TriageRecord)
+async def mark_as_seen(triage_id: str):
+    record = await triage_service.mark_as_seen(triage_id)
     if not record:
         raise HTTPException(status_code=404, detail="Triage record not found")
     return record

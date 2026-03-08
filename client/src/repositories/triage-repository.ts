@@ -61,6 +61,11 @@ export const triageRepository = {
     exportToEhr: async (id: string): Promise<{ status: string; message: string }> => {
         const response = await apiClient.post<{ status: string; message: string }>(`/triage/${id}/export`);
         return response.data;
+    },
+
+    markAsSeen: async (id: string): Promise<TriageRecord> => {
+        const response = await apiClient.post<TriageRecord>(`/triage/${id}/seen`);
+        return response.data;
     }
 };
 

@@ -204,6 +204,16 @@ def detect_anomalies(audio_bytes: bytes) -> dict:
     return {"score": acoustic_score, "interpretation": f"Acoustic Deviation Score {acoustic_score}/10"}
 ```
 
+#### Significance of Cosine Similarity
+
+In the HeAR analysis, **Cosine Similarity** is the mathematical engine used to measure **Temporal Stability**—a key clinical indicator of respiratory or neurological distress.
+
+1.  **Measuring Acoustic Consistency**: The HeAR model converts raw audio into high-dimensional vectors (embeddings) that capture deep clinical features. Cosine Similarity measures the "angle" between these vectors. If similarity is close to **1.0**, the clinical "fingerprint" is stable; if it drops toward **0.0**, the patterns are fundamentally changing.
+2.  **Clinical Triage Logic**:
+    *   **High Similarity (STABLE)**: Indicates steady breathing and consistent vocalization (Lower Risk).
+    *   **Low Similarity (INSTABLE)**: Indicates "Acoustic Chaos" caused by gasping, irregular breath cycles, or coughing paroxysms (Higher Risk).
+3.  **Detecting "Invisible" Distress**: This mathematical approach allows the system to detect objective distress markers that might be missed by human ears or manual counting, providing a "gut feeling" vital sign derived from geometry.
+
 #### Clinical Interpretation
 
 | Score Range | Interpretation | Clinical Significance |

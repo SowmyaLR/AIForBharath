@@ -118,11 +118,11 @@ class AIServiceError(Exception):
     pass
 class AudioProcessor:
     def __init__(self):
-        # 1. Initialize Whisper Model (faster-whisper + Distil optimization)
-        print("🚀 Initializing Whisper distil-large-v3...")
+        # 1. Initialize Whisper Model (faster-whisper medium)
+        print("🚀 Initializing Whisper medium model...")
         print("💡 NOTE: First-time loading will download ~1.5GB of model weights. Please wait...")
-        # distil-large-v3 is 3x faster than medium with better accuracy
-        self.asr_model = WhisperModel("distil-large-v3", device="auto", compute_type="int8", cpu_threads=4)
+        # medium model provides much better translation quality than distil models
+        self.asr_model = WhisperModel("medium", device="auto", compute_type="int8", cpu_threads=4)
         
         # 2. Initialize HeAR (Official Keras)
         print("Loading HeAR model (HuggingFace)...")

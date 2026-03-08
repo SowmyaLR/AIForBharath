@@ -33,6 +33,7 @@ export interface TriageRecord {
     specialty: string;
     patient_age?: number | null;
     status: 'pending' | 'in_progress' | 'ready_for_review' | 'finalized' | 'exported' | 'failed';
+    is_seen: boolean;
     created_at: string;
     updated_at: string;
 }

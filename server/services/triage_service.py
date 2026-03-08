@@ -2,7 +2,7 @@ import os
 import json
 import logging
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict
 from pydantic import BaseModel
 import uuid
@@ -50,6 +50,7 @@ class TriageRecord(BaseModel):
     specialty: str = "General Medicine"
     patient_age: Optional[int] = None
     status: str
+    is_seen: bool = False
     idempotency_key: Optional[str] = None  # prevents double-submit duplicates
     created_at: datetime
     updated_at: datetime
@@ -79,8 +80,9 @@ class TriageService:
             patient_age=patient_age,
             idempotency_key=idempotency_key,
             status="pending",
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            is_seen=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
         )
         MOCK_TRIAGES[triage_id] = record
         return record
@@ -99,26 +101,33 @@ class TriageService:
         record = MOCK_TRIAGES.get(triage_id)
         if record:
             record.status = status
-            record.updated_at = datetime.utcnow()
+            record.updated_at = datetime.now(timezone.utc)
+        return record
+
+    async def mark_as_seen(self, triage_id: str) -> Optional[TriageRecord]:
+        record = MOCK_TRIAGES.get(triage_id)
+        if record:
+            record.is_seen = True
+            record.updated_at = datetime.now(timezone.utc)
         return record
 
     async def add_vitals(self, triage_id: str, vitals: VitalSigns) -> Optional[TriageRecord]:
         record = MOCK_TRIAGES.get(triage_id)
         if record:
             record.vitals = vitals
-            record.updated_at = datetime.utcnow()
+            record.updated_at = datetime.now(timezone.utc)
         return record
 
     async def update_soap_note(self, triage_id: str, soap_note: SOAPNote) -> Optional[TriageRecord]:
         record = MOCK_TRIAGES.get(triage_id)
         if record and record.status != "finalized":
             record.soap_note = soap_note
-            record.updated_at = datetime.utcnow()
+            record.updated_at = datetime.now(timezone.utc)
         return record
 
     async def save_triage_record(self, record: TriageRecord) -> TriageRecord:
         """Full record save — in dev mode just updates the in-memory dict."""
-        record.updated_at = datetime.utcnow()
+        record.updated_at = datetime.now(timezone.utc)
         MOCK_TRIAGES[record.id] = record
         return record
 
@@ -126,7 +135,8 @@ class TriageService:
         records = list(MOCK_TRIAGES.values())
         if specialty:
             records = [r for r in records if r.specialty == specialty]
-        return sorted(records, key=lambda x: (-x.risk_score, x.created_at))
+        # Priority: Highest risk first, then newest first
+        return sorted(records, key=lambda x: (-x.risk_score, x.created_at.timestamp()), reverse=True)
 
 
 # ── DynamoDB Service (demo mode) ─────────────────────────────────────────────
@@ -156,12 +166,14 @@ def _decimal_to_float(obj):
 def _serialize(record: TriageRecord) -> dict:
     """Convert a TriageRecord to a DynamoDB-compatible dict."""
     data = record.model_dump()
-    # Convert datetime objects to ISO strings
+    # Convert datetime objects to ISO strings with explicit Z suffix for UTC
     for key in ("created_at", "updated_at"):
         if isinstance(data.get(key), datetime):
-            data[key] = data[key].isoformat()
+            dt = data[key]
+            data[key] = dt.isoformat().replace('+00:00', 'Z') if dt.tzinfo else dt.isoformat() + 'Z'
     if data.get("vitals") and isinstance(data["vitals"].get("recorded_at"), datetime):
-        data["vitals"]["recorded_at"] = data["vitals"]["recorded_at"].isoformat()
+        rv = data["vitals"]["recorded_at"]
+        data["vitals"]["recorded_at"] = rv.isoformat().replace('+00:00', 'Z') if rv.tzinfo else rv.isoformat() + 'Z'
     if data.get("soap_note") is None:
         data.pop("soap_note", None)
     if data.get("vitals") is None:
@@ -216,8 +228,9 @@ class DynamoDBTriageService:
             patient_age=patient_age,
             idempotency_key=idempotency_key,
             status="pending",
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            is_seen=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
         )
         self._table.put_item(Item=_serialize(record))
         logger.info(json.dumps({"event": "triage_created", "triage_id": triage_id, "patient_id": patient_id}))
@@ -244,13 +257,22 @@ class DynamoDBTriageService:
 
     async def save_triage_record(self, record: TriageRecord) -> TriageRecord:
         """Full record overwrite — use after pipeline completes to persist all fields."""
-        record.updated_at = datetime.utcnow()
+        record.updated_at = datetime.now(timezone.utc)
         self._table.put_item(Item=_serialize(record))
         logger.info(json.dumps({"event": "triage_saved", "triage_id": record.id, "status": record.status}))
         return record
 
+    async def mark_as_seen(self, triage_id: str) -> Optional[TriageRecord]:
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        self._table.update_item(
+            Key={"id": triage_id},
+            UpdateExpression="SET is_seen = :s, updated_at = :u",
+            ExpressionAttributeValues={":s": True, ":u": now}
+        )
+        return await self.get_triage(triage_id)
+
     async def update_triage_status(self, triage_id: str, status: str) -> Optional[TriageRecord]:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         self._table.update_item(
             Key={"id": triage_id},
             UpdateExpression="SET #s = :s, updated_at = :u",
@@ -262,8 +284,9 @@ class DynamoDBTriageService:
     async def add_vitals(self, triage_id: str, vitals: VitalSigns) -> Optional[TriageRecord]:
         vitals_data = vitals.model_dump()
         if isinstance(vitals_data.get("recorded_at"), datetime):
-            vitals_data["recorded_at"] = vitals_data["recorded_at"].isoformat()
-        now = datetime.utcnow().isoformat()
+            rv = vitals_data["recorded_at"]
+            vitals_data["recorded_at"] = rv.isoformat().replace('+00:00', 'Z') if rv.tzinfo else rv.isoformat() + 'Z'
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         self._table.update_item(
             Key={"id": triage_id},
             UpdateExpression="SET vitals = :v, updated_at = :u",
@@ -272,7 +295,7 @@ class DynamoDBTriageService:
         return await self.get_triage(triage_id)
 
     async def update_soap_note(self, triage_id: str, soap_note: SOAPNote) -> Optional[TriageRecord]:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         self._table.update_item(
             Key={"id": triage_id},
             UpdateExpression="SET soap_note = :n, updated_at = :u",
@@ -313,7 +336,8 @@ class DynamoDBTriageService:
         if specialty:
             records = [r for r in records if r.specialty == specialty]
 
-        return sorted(records, key=lambda x: (-x.risk_score, x.created_at))
+        # Priority: Highest risk first, then newest first
+        return sorted(records, key=lambda x: (-x.risk_score, x.created_at.timestamp()), reverse=True)
 
 
 # ── Factory ──────────────────────────────────────────────────────────────────
