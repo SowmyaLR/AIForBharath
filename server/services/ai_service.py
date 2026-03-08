@@ -1,5 +1,5 @@
 import os
-# Enable ultra-fast downloads for large models
+# Enable ultra-fast downloads for large models.
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 import io
 import re
