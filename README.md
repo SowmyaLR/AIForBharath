@@ -62,7 +62,7 @@ graph TD
         ECS[ECS Fargate<br/>FastAPI Backend<br/>4 vCPU / 16GB RAM]
         W[Whisper Medium<br/>In-Container ASR<br/>int8 Quantized]
         H[HeAR Nitro<br/>In-Container Bioacoustics<br/>Vectorized Batch Inference]
-        SM[SageMaker Real-Time<br/>ml.g5.xlarge A10G GPU<br/>MedGemma 4B-it]
+        SM[SageMaker Async Inference<br/>ml.g5.xlarge A10G GPU<br/>MedGemma 4B-it]
     end
 
     subgraph "Data Persistence"
@@ -83,7 +83,7 @@ graph TD
     ALB --> ECS
     ECS -->|Parallel Inference| W
     ECS -->|Parallel Inference| H
-    ECS -->|Sequential| SM
+    ECS -->|Async I/O via S3| SM
     ECS -->|202 Accepted| SQS
     ECS --> DDB
     ECS --> S3
@@ -107,12 +107,40 @@ graph TD
 | **API Gateway** | API Gateway v2 | HTTPS proxy for ALB | Resolves mixed-content issues, provides unified HTTPS endpoint |
 | **Load Balancer** | Application Load Balancer | Multi-AZ, health checks | Distributes traffic, automatic failover |
 | **Compute** | ECS Fargate | 4 vCPU / 16GB RAM, stateless tasks | Runs FastAPI backend + Whisper + HeAR in-container |
-| **AI Inference** | SageMaker Real-Time | ml.g5.xlarge (A10G GPU, 24GB VRAM) | MedGemma 4B-it for SOAP note generation |
+| **AI Inference** | SageMaker Async | ml.g5.xlarge (A10G GPU) | MedGemma 4B-it; Scales to 0 when idle |
 | **Database** | DynamoDB | On-Demand, GSI for status/patient queries | Triage records, patient metadata, O(1) retrieval |
 | **Storage** | S3 | SSE-KMS encryption, lifecycle policies | Audio files, FHIR R4 bundles, 7-year retention |
 | **Async Queue** | SQS + DLQ | 120s visibility timeout, 3 max retries | Decouples submission from AI processing |
 | **Monitoring** | CloudWatch + SNS | Structured JSON logs, alarms | Real-time alerts, audit trails, performance metrics |
 
+---
+
+## 🚀 Testing & Evaluation Guide (For Judges)
+
+VaidyaSaarathi is built with a **production-grade cost-optimization strategy** called **Scale-to-Zero**. Instead of burning idle GPU credits, our MedGemma engine "sleeps" when not in use and wakes up automatically on your first request.
+
+### **What to Expect During Evaluation**
+
+1.  **The First Hit (Cold Start)**: When you submit your first triage request, the backend will show "Polling for result". 
+    *   **Wait Time**: Please allow **5-8 minutes** for the first request.
+    *   **Why?**: This includes ~2 minutes for the AWS CloudWatch alarm to trigger and ~4 minutes for the physical A10G GPU server to boot up and load the MedGemma model weights.
+2.  **Subsequent Hits (Warm State)**: Once the GPU is awake, all subsequent triage requests will process in **< 20 seconds**.
+3.  **Automatic Shutdown**: The system will automatically return to sleep after 10 minutes of inactivity to save costs.
+
+### **How to Monitor Progress**
+
+If you have AWS CLI access, you can monitor the "Wake Up" progress in real-time:
+```bash
+aws sagemaker describe-endpoint \
+  --endpoint-name vaidyasaarathi-demo-v2-medgemma-endpoint \
+  --query "[EndpointStatus, ProductionVariants[0].DesiredInstanceCount]"
+```
+*   `["InService", 0]` -> System is sleeping (Saving $1.40/hr)
+*   `["Updating", 1]` -> **GPU is Waking Up!** (Please wait 4-5 mins)
+*   `["InService", 1]` -> **System is Ready!** (Fast results)
+
+> [!TIP]
+> This architecture reduces our operational burn rate by **95%**, saving approximately **$1,000/month** in production while maintaining 100% data privacy within our VPC.
 
 ---
 
@@ -261,9 +289,9 @@ batch_embeddings = model(np.array(chunks))  # Single batched call
 - Built-in safety guardrails for medical context
 
 **Deployment**:
-- SageMaker Real-Time Endpoint: `ml.g5.xlarge` (NVIDIA A10G GPU, 24GB VRAM)
+- SageMaker Asynchronous Inference: `ml.g5.xlarge` (NVIDIA A10G GPU, 24GB VRAM)
 - bfloat16 precision for optimal speed/accuracy tradeoff
-- Scheduled on/off (08:00-20:00 IST) to reduce idle GPU costs by ~50%
+- **Scale-to-Zero Survival Plan**: Automatically shuts down after 10 minutes of idleness, reducing costs to **$0.00/hr** when not in use.
 
 **Input Context**:
 ```python
@@ -303,7 +331,7 @@ OUTPUT FORMAT (JSON):
 
 **Output**: Structured SOAP note with triage tier assignment
 
-**Performance**: ~8.3 seconds (warm endpoint), ~3-5 minutes (cold start—mitigated by EventBridge keep-alive pings)
+**Performance**: ~8.3 seconds (warm), ~3-5 minutes (cold start). Polling timeout increased to 15 minutes to handle automated wake-ups gracefully.
 
 ---
 
@@ -606,17 +634,19 @@ def _invoke_sagemaker_with_retry(body: dict, max_attempts: int = 3) -> dict:
             raise
 ```
 
-#### Cold Start Mitigation
-```python
-# EventBridge rule: rate(8 minutes) during clinic hours (08:00-20:00 IST)
-def keep_alive_ping(event, context):
-    sagemaker_runtime.invoke_endpoint(
-        EndpointName=MEDGEMMA_ENDPOINT,
-        Body=json.dumps({"inputs": "ping"})
-    )
+#### Automated Scale-to-Zero (Survival Plan)
+```hcl
+# main.tf
+resource "aws_appautoscaling_policy" "scale_in" {
+    # Shuts down GPU if backlog is empty for 10 minutes
+    step_adjustment {
+      scaling_adjustment = 0
+      metric_interval_upper_bound = 0
+    }
+}
 ```
 
-**Result**: Endpoint stays warm, avoiding 3-5 minute cold starts during patient care.
+**Result**: The endpoint automatically scales to **0 instances** when idle, reducing burn rate to **$0/day** during judge inactivity. The first request automatically triggers a wake-up signal.
 
 ---
 

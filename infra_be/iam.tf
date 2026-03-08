@@ -74,6 +74,15 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
           data.terraform_remote_state.storage.outputs.fhir_bucket_arn,
           "${data.terraform_remote_state.storage.outputs.fhir_bucket_arn}/*"
         ]
+      },
+      {
+        Sid    = "AsyncInferenceBucketAccess"
+        Effect = "Allow"
+        Action = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+        Resource = [
+          "arn:aws:s3:::${data.terraform_remote_state.infra.outputs.medgemma_async_bucket}",
+          "arn:aws:s3:::${data.terraform_remote_state.infra.outputs.medgemma_async_bucket}/*"
+        ]
       }
     ]
   })
@@ -118,7 +127,7 @@ resource "aws_iam_role_policy" "ecs_task_sagemaker" {
       {
         Sid    = "InvokeMedGemma"
         Effect = "Allow"
-        Action = ["sagemaker:InvokeEndpoint"]
+        Action = ["sagemaker:InvokeEndpoint", "sagemaker:InvokeEndpointAsync"]
         Resource = [
           "arn:aws:sagemaker:${var.aws_region}:${data.aws_caller_identity.current.account_id}:endpoint/${var.medgemma_endpoint_name}"
         ]

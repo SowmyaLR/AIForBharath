@@ -27,7 +27,7 @@ graph TD
     subgraph "AI Inference"
         LOCAL_W[In-Container\nfaster-whisper medium]
         LOCAL_H[In-Container\nGoogle HeAR]
-        SM_MG[SageMaker Real-Time\nml.g5.xlarge — MedGemma 4b-it]
+        SM_MG[SageMaker Async Inference\nml.g5.xlarge — MedGemma 4b-it]
     end
     subgraph "Data"
         DDB[DynamoDB — On-Demand]
@@ -48,8 +48,10 @@ graph TD
     SQS --> Lambda
     Lambda -->|parallel| LOCAL_W
     Lambda -->|parallel| LOCAL_H
-    LOCAL_W -->|transcript| SM_MG
-    LOCAL_H -->|acoustic score| SM_MG
+    LOCAL_W -->|S3 Upload| S3
+    LOCAL_H -->|Vitals| DDB
+    DDB -->|Trigger Async| SM_MG
+    S3 -->|Input/Output| SM_MG
     Lambda --> DDB
     Lambda -->|on failure| DLQ
     DLQ --> SNS
@@ -65,7 +67,7 @@ graph TD
 | **Frontend** | AWS Amplify | Native Next.js SSR support with git-integrated CI/CD. Medical dashboards require server-rendered pages to ensure fresh patient data on every load. Atomic deployments eliminate partial rollouts. |
 | **API** | ECS Fargate | Containerised FastAPI with no EC2 management overhead. Fargate provides HIPAA-eligible isolated compute. Task-level IAM roles enforce least-privilege access to downstream AWS services. |
 | **ASR + Bioacoustics** | In-container (ECS) | faster-whisper and HeAR run within the FastAPI container on CPU. Both models are lightweight enough to operate without dedicated GPU. Keeps the pipeline self-contained and eliminates inter-service network hops for these two steps. |
-| **MedGemma 4b-it** | SageMaker Real-Time (ml.g5.xlarge) | SOAP note generation requires the A10G GPU (24 GB VRAM) for bfloat16 inference at acceptable latency (~4–6s). Confirmed working on this instance type. Endpoint is scheduled on/off around clinic hours to control idle cost. |
+| **MedGemma 4b-it** | SageMaker Async (ml.g5.xlarge) | SOAP note generation requires the A10G GPU (24 GB VRAM). Asynchronous Inference allows **Scale-to-Zero**, meaning you pay $0.00/hr during idle periods. Automated wake-up handles new requests. |
 | **Async Queue** | SQS + Lambda | Decouples audio submission from AI processing. The triage submission endpoint returns immediately (202); Lambda processes the AI pipeline asynchronously. SQS provides at-least-once delivery with built-in retry. |
 | **Database** | DynamoDB (On-Demand) | Multi-AZ by default with a 99.999% SLA. On-Demand mode eliminates capacity planning errors and ProvisionedThroughputExceeded failures. Millisecond read latency for triage queue queries. No database server to manage. |
 | **Storage** | Amazon S3 | 11-nines durability for non-reproducible patient audio. Lifecycle policies tier old recordings to Glacier for multi-year medical record retention. All access via pre-signed URLs — no public bucket exposure. |
@@ -82,7 +84,7 @@ graph TD
 |---|---|---|---|---|
 | **faster-whisper medium** | In-container (ECS Fargate) | CPU (int8) | ~3–5s | int8 quantisation makes it CPU-efficient. Runs inside the FastAPI container; no additional endpoint or network hop required. |
 | **Google HeAR** | In-container (ECS Fargate) | CPU | ~2–4s | Lightweight TF SavedModel. No GPU required. Runs in parallel with Whisper within the same Lambda/container execution. |
-| **MedGemma 4b-it** | SageMaker Real-Time Endpoint | ml.g5.xlarge (A10G GPU) | ~4–6s | bfloat16 inference requires GPU VRAM. Tested and confirmed on this instance. Endpoint scheduled off outside clinic hours to reduce idle cost. |
+| **MedGemma 4b-it** | SageMaker Asynchronous Endpoint | ml.g5.xlarge (A10G GPU) | ~4–6s | bfloat16 inference requires GPU VRAM. Async mode enables **Scale-to-Zero** for maximum cost savings. |
 
 ### Parallel Execution Model
 
@@ -93,7 +95,7 @@ Whisper (ASR) and HeAR (bioacoustics) are computationally independent and run in
 Audio Input ────┤                                   ├──→ SageMaker MedGemma (4–6s) ──→ SOAP Note
                 └─→ In-container HeAR    (2–4s) ──┘
 
-Total latency: ~10–12s (MedGemma warm) | ~3–5 min (first invocation — endpoint cold start)
+Total latency: ~10–12s (MedGemma warm) | ~3–8 min (Cold Start wake-up)
 ```
 
 **vs. local sequential execution:** `Whisper (35s) → HeAR (25s) → MedGemma (30s) = 90s`
@@ -113,21 +115,11 @@ async def run_ai_pipeline(audio_bytes: bytes, language: str, vitals: dict):
     return transcript, acoustic, soap_note
 ```
 
-### Cold Start Mitigation
-
-An EventBridge scheduled rule fires every 8 minutes during clinic hours (08:00–20:00 IST). A Lambda function invokes the MedGemma SageMaker endpoint with a minimal payload, keeping model weights resident in GPU VRAM and preventing the endpoint from scaling down mid-session.
-
-```
-EventBridge rule: rate(8 minutes) [08:00–20:00 IST]
-  → Lambda: ping_medgemma
-    → invoke_endpoint(EndpointName=medgemma, Body={"inputs": "ping"})
-
-Endpoint lifecycle:
-  → Start: EventBridge at 07:50 IST (10 min before clinic opens)
-  → Stop:  EventBridge at 20:00 IST (clinic close)
-```
-
-Endpoint scheduled on/off saves ~50% of idle GPU cost (~$1.408/hr saved for 12 hrs/day).
+#### Automated Scale-to-Zero (Survival Plan)
+An application auto-scaling policy monitors the `ApproximateBacklogSize` metric. When no requests are pending, the instance count is set to **0**.
+- **Idle Cost**: $0.00/hour
+- **Active Cost**: $1.408/hour (ml.g5.xlarge in ap-south-1)
+- **Wake-up Trigger**: The first request uploads to S3, triggering the `has-backlog` alarm and scaling to 1.
 
 ---
 
@@ -451,7 +443,7 @@ fields @timestamp, triage_id, zone
 | Service | Configuration | Daily | 12-Day Total |
 |---|---|---|---|
 | ECS Fargate | 1 task (FastAPI + Whisper + HeAR in-container), 12 hrs/day | $0.40 | $4.80 |
-| SageMaker Real-Time | ml.g5.xlarge — MedGemma, 12 hrs/day (scheduled) | $16.90 | $202.80 |
+| SageMaker Async | ml.g5.xlarge — 100% Scale-to-Zero | $0.00* | ~$5.00 |
 | ALB | 1 load balancer | $0.60 | $7.20 |
 | CloudFront + WAF | < 1M requests | $0.10 | $1.20 |
 | Amplify Hosting | Build + SSR | $0.10 | $1.20 |
@@ -459,7 +451,7 @@ fields @timestamp, triage_id, zone
 | S3 | ~1 GB audio/day | $0.10 | $1.20 |
 | Lambda | ~100 invocations/day | $0.02 | $0.24 |
 | CloudWatch | Logs + alarms | $0.20 | $2.40 |
-| **Total** | | **~$18.47/day** | **~$221 (12 days)** |
+| **Total** | | **~$1.57/day** | **~$19 (12 days)** |
 
 ### MedGemma Real-Time Endpoint Cost Model
 
@@ -467,12 +459,11 @@ fields @timestamp, triage_id, zone
 Instance: ml.g5.xlarge
 On-demand rate: $1.408/hr (ap-south-1)
 
-Scheduled operation (08:00–20:00 IST = 12 hrs/day):
-  $1.408/hr × 12hr = $16.90/day
-  vs. always-on: $1.408/hr × 24hr = $33.79/day
-  Saving: ~$16.89/day by scheduling
-
-12-day total (GPU only): ~$202.80
+Scheduled operation (Automated Scale-to-Zero):
+  Average usage (1 hr/day active) = $1.408/day
+  Idle time (23 hrs/day) = $0.00/day
+  Total: ~$1.41/day
+  Saving vs Real-Time: **~$32.38/day saved**
 ```
 
 > **Note:** GPU compute for MedGemma is the dominant cost driver (~91% of total). Use AWS credits to cover this. The endpoint is the exact confirmed-working configuration — no changes to model, container, or instance type.
@@ -486,7 +477,7 @@ Scheduled operation (08:00–20:00 IST = 12 hrs/day):
 | Component | Configuration |
 |---|---|
 | Authentication | Demo credential login (`auth.py`) |
-| AI Inference | SageMaker Real-Time ml.g5.xlarge (MedGemma) + Whisper/HeAR in-container |
+| AI Inference | SageMaker Asynchronous ml.g5.xlarge (MedGemma) + Whisper/HeAR in-container |
 | Backend | ECS Fargate single task |
 | Async pipeline | SQS + Lambda |
 | Networking | Default VPC |

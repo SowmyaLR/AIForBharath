@@ -22,3 +22,8 @@ output "sagemaker_execution_role_arn" {
   description = "IAM role ARN used by SageMaker"
   value       = aws_iam_role.sagemaker_exec.arn
 }
+
+output "medgemma_async_bucket" {
+  description = "S3 bucket for SageMaker Async inputs/outputs"
+  value       = aws_s3_bucket.async_outputs.bucket
+}

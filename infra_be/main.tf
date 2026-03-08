@@ -21,6 +21,11 @@ data "terraform_remote_state" "storage" {
   config  = { path = "../infra_storage/terraform.tfstate" }
 }
 
+data "terraform_remote_state" "infra" {
+  backend = "local"
+  config  = { path = "../infra/terraform.tfstate" }
+}
+
 # ── ECR Repository ───────────────────────────────────────────────────────────
 
 resource "aws_ecr_repository" "api" {
@@ -207,6 +212,7 @@ resource "aws_ecs_task_definition" "api" {
         { name = "DYNAMODB_TRIAGE_TABLE",        value = data.terraform_remote_state.storage.outputs.triage_table_name },
         { name = "DYNAMODB_PATIENTS_TABLE",      value = data.terraform_remote_state.storage.outputs.patients_table_name },
         { name = "SAGEMAKER_MEDGEMMA_ENDPOINT",  value = var.medgemma_endpoint_name },
+        { name = "SAGEMAKER_ASYNC_BUCKET",       value = data.terraform_remote_state.infra.outputs.medgemma_async_bucket },
         { name = "FRONTEND_URL",                 value = var.frontend_url },
       ]
 

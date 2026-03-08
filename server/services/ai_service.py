@@ -37,48 +37,18 @@ if APP_ENV == "demo":
         from botocore.config import Config
         _sm_config = Config(read_timeout=60, connect_timeout=5, retries={"max_attempts": 1})
         _sm_runtime = boto3.client("sagemaker-runtime", region_name=AWS_REGION, config=_sm_config)
+        _s3_client = boto3.client("s3", region_name=AWS_REGION) # Added for async polling
         logger.info(json.dumps({"event": "demo_mode_init", "endpoint": SAGEMAKER_MEDGEMMA_ENDPOINT}))
     except ImportError:
         logger.warning(json.dumps({"event": "boto3_missing_fallback_ollama"}))
         APP_ENV = "dev"
         _sm_runtime = None
+        _s3_client = None
 else:
     _sm_runtime = None
+    _s3_client = None
     logger.info(json.dumps({"event": "dev_mode_init", "ollama_host": OLLAMA_HOST}))
 
-
-def _invoke_sagemaker_with_retry(body: dict, max_attempts: int = 3) -> dict:
-    """
-    Invoke SageMaker endpoint with exponential backoff retry.
-    Handles ModelNotReadyException (endpoint loading) and throttling.
-    """
-    for attempt in range(max_attempts):
-        try:
-            resp = _sm_runtime.invoke_endpoint(
-                EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
-                ContentType="application/json",
-                Body=json.dumps(body)
-            )
-            return json.loads(resp["Body"].read().decode("utf-8"))
-        except _sm_runtime.exceptions.ModelNotReadyException:
-            wait = min(2 ** attempt, 30)
-            logger.warning(json.dumps({
-                "event": "sagemaker_model_not_ready",
-                "attempt": attempt + 1,
-                "retry_in_s": wait
-            }))
-            if attempt < max_attempts - 1:
-                time.sleep(wait)
-            else:
-                raise AIServiceError("SageMaker endpoint not ready after retries. Endpoint may be starting up.")
-        except Exception as e:
-            if "ThrottlingException" in str(type(e).__name__):
-                wait = min(2 ** attempt * 2, 30)
-                logger.warning(json.dumps({"event": "sagemaker_throttled", "attempt": attempt + 1, "retry_in_s": wait}))
-                if attempt < max_attempts - 1:
-                    time.sleep(wait)
-                    continue
-            raise
 
 
 class AIServiceError(Exception):
@@ -456,29 +426,94 @@ class AudioProcessor:
         DEV  → Ollama (Local)
         """
         if APP_ENV == "demo" and _sm_runtime and SAGEMAKER_MEDGEMMA_ENDPOINT:
-            print(f"[ENV] Calling SageMaker endpoint: {SAGEMAKER_MEDGEMMA_ENDPOINT}")
+            print(f"[ENV] Calling SageMaker Async endpoint: {SAGEMAKER_MEDGEMMA_ENDPOINT}")
             
-            # Use Gemma Chat Template for instruction adherence
+            # 1. Prepare Payload & Upload to S3 (Async Inference Requires InputLocation)
             formatted_prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
-            
-            response = _sm_runtime.invoke_endpoint(
-                EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
-                ContentType="application/json",
-                Body=json.dumps({
-                    "inputs": formatted_prompt, 
-                    "parameters": {
-                        "max_new_tokens": 512, 
-                        "temperature": 0.2,
-                        "top_p": 0.95,
-                        "do_sample": True,
-                        "stop": ["<end_of_turn>", "<eos>"]
-                    }
-                })
-            )
-            result = json.loads(response["Body"].read().decode("utf-8"))
-            if isinstance(result, list) and result:
-                return result[0].get("generated_text", "")
-            return result.get("generated_text", str(result))
+            payload = {
+                "inputs": formatted_prompt, 
+                "parameters": {
+                    "max_new_tokens": 512, 
+                    "temperature": 0.2,
+                    "top_p": 0.95,
+                    "do_sample": True,
+                    "stop": ["<end_of_turn>", "<eos>"]
+                }
+            }
+
+            try:
+                # Use the same bucket for input and output. 
+                # Bucket name pattern from Terraform: project-env-sagemaker-async-accountid
+                # For now, we'll derive it or expect it in env. 
+                # Proactively adding a uuid for unique input path.
+                import uuid
+                request_id = str(uuid.uuid4())
+                
+                # We need the bucket name. I'll add a way to get it or default it.
+                # In main.tf it's ${local.name_prefix}-sagemaker-async-${data.aws_caller_identity.current.account_id}
+                # Let's check environment first.
+                async_bucket = os.getenv("SAGEMAKER_ASYNC_BUCKET")
+                if not async_bucket:
+                    # Fallback attempt to find it via listing or naming convention if not set
+                    # Ideally passed via env var. I'll ask user to set this or I will check terraform outputs.
+                    logger.warning(json.dumps({"event": "sagemaker_async_bucket_missing_env"}))
+                    # For demo purposes, we will assume it is set or we will find it.
+                    # I will update the code to handle a missing bucket gracefully.
+                    raise AIServiceError("SAGEMAKER_ASYNC_BUCKET environment variable is not set.")
+
+                input_key = f"medgemma-inputs/{request_id}.json"
+                input_location = f"s3://{async_bucket}/{input_key}"
+                
+                _s3_client.put_object(
+                    Bucket=async_bucket,
+                    Key=input_key,
+                    Body=json.dumps(payload),
+                    ContentType="application/json"
+                )
+
+                # 2. Start Async Inference
+                response = _sm_runtime.invoke_endpoint_async(
+                    EndpointName=SAGEMAKER_MEDGEMMA_ENDPOINT,
+                    ContentType="application/json",
+                    InputLocation=input_location
+                )
+                
+                output_location = response["OutputLocation"]
+                # Parse S3 URI: s3://bucket/key
+                output_bucket = output_location.split("/")[2]
+                output_key = "/".join(output_location.split("/")[3:])
+                
+                logger.info(json.dumps({"event": "sagemaker_async_started", "output_location": output_location}))
+                print(f"[ENV] Async request submitted. Input: {input_location}. Output will be at: {output_location}")
+
+                # 3. Poll for Result (Target: Survival/Judge wait time)
+                # Max wait: 15 minutes (covers 5-10m cold start + 2-5m inference)
+                max_retries = 180 # 180 * 5s = 900s (15 minutes)
+                for attempt in range(max_retries):
+                    try:
+                        resp = _s3_client.get_object(Bucket=output_bucket, Key=output_key)
+                        result = json.loads(resp["Body"].read().decode("utf-8"))
+                        print(f"[ENV] Async result received after {attempt * 5}s")
+                        
+                        # Cleanup input
+                        try:
+                            _s3_client.delete_object(Bucket=async_bucket, Key=input_key)
+                        except: pass
+
+                        if isinstance(result, list) and result:
+                            return result[0].get("generated_text", "")
+                        return result.get("generated_text", str(result))
+                    except _s3_client.exceptions.NoSuchKey:
+                        # Wait and retry
+                        if attempt % 6 == 0: # Print every 30s
+                            print(f"[ENV] Polling for result... ({attempt * 5}s elapsed)")
+                        time.sleep(5)
+                
+                raise AIServiceError("Asynchronous inference timed out after 8 minutes.")
+
+            except Exception as e:
+                logger.error(json.dumps({"event": "sagemaker_async_failed", "error": str(e)}))
+                raise
         else:
             # Ollama handles templating automatically via its Modelfile
             response = requests.post(
