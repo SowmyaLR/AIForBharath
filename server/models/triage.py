@@ -36,5 +36,6 @@ class TriageRecord(BaseModel):
     triage_tier: str = "ROUTINE" # 'EMERGENCY' | 'URGENT' | 'SEMI_URGENT' | 'ROUTINE'
     specialty: str = "General Medicine"
     status: str  # 'pending' | 'in_progress' | 'ready_for_review' | 'finalized'
+    is_seen: bool = False
     created_at: datetime
     updated_at: datetime

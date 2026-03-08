@@ -1,5 +1,5 @@
 # ════════════════════════════════════════════
-#  VaidyaSaarathi — Backend Variables (ECS Fargate)
+#  VaidyaSaarathi — Lambda Variables
 # ════════════════════════════════════════════
 
 variable "aws_region" {
@@ -21,21 +21,19 @@ variable "environment" {
 }
 
 variable "medgemma_endpoint_name" {
-  description = "SageMaker MedGemma endpoint name (from infra/)"
+  description = "SageMaker endpoint name from infra/ — do not change"
   type        = string
-  # Get from: cd infra && terraform output medgemma_endpoint_name
+  # Copy from: cd infra && terraform output medgemma_endpoint_name
 }
 
-variable "frontend_url" {
-  description = "Amplify frontend URL — used for CORS allow_origins in FastAPI"
+variable "medgemma_endpoint_config" {
+  description = "SageMaker endpoint config name from infra/ — do not change"
   type        = string
-  default     = "http://localhost:3000"
-  # Update after infra_fe is applied: e.g. https://main.xxxxx.amplifyapp.com
+  # Copy from: cd infra && terraform output medgemma_endpoint_config_name (or check AWS console)
 }
 
-variable "hf_token_ssm_param_arn" {
-  description = "ARN of SSM Parameter Store entry holding the HuggingFace token"
+variable "alert_sns_topic_arn" {
+  description = "SNS topic ARN from infra_sqs — copy from infra_sqs outputs"
   type        = string
-  # Create with: aws ssm put-parameter --name /vaidyasaarathi/hf-token --value "hf_..." --type SecureString
-  # Then copy the ARN here: arn:aws:ssm:ap-south-1:<account>:parameter/vaidyasaarathi/hf-token
+  # Copy from: cd infra_sqs && terraform output sns_topic_arn
 }

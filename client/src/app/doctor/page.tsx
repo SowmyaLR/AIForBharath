@@ -27,7 +27,7 @@ export default function DoctorPage() {
     useEffect(() => {
         if (user) {
             fetchQueue();
-            const interval = setInterval(fetchQueue, 30000);
+            const interval = setInterval(fetchQueue, 10000); // 10s — faster for demo
             return () => clearInterval(interval);
         }
     }, [user, filterSpecialty]);
@@ -41,11 +41,34 @@ export default function DoctorPage() {
         try {
             const records = await triageRepository.getQueue(filterSpecialty === 'All' ? undefined : filterSpecialty);
             const filtered = records.filter(item => item.status === 'ready_for_review' || item.status === 'finalized' || item.status === 'exported');
-            setQueue(filtered);
+
+            // Priority: Highest risk first, then UNSEEN first, then newest first
+            const sorted = filtered.sort((a, b) => {
+                // Secondary score for risk tiers
+                const tierScore = (t: string) => {
+                    if (t === 'EMERGENCY') return 4;
+                    if (t === 'URGENT') return 3;
+                    if (t === 'SEMI_URGENT') return 2;
+                    return 1;
+                };
+
+                const scoreA = tierScore(a.triage_tier);
+                const scoreB = tierScore(b.triage_tier);
+
+                if (scoreA !== scoreB) return scoreB - scoreA;
+
+                // If same priority, unseen comes first
+                if (a.is_seen !== b.is_seen) return a.is_seen ? 1 : -1;
+
+                // If same status, newest first
+                return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+            });
+
+            setQueue(sorted);
 
             // Sync selected patient if it was updated in the background
             if (selectedPatient) {
-                const updated = filtered.find(p => p.id === selectedPatient.id);
+                const updated = sorted.find(p => p.id === selectedPatient.id);
                 if (updated && JSON.stringify(updated.soap_note) !== JSON.stringify(selectedPatient.soap_note)) {
                     setSelectedPatient(updated);
                     if (!editedSoap || (editedSoap.subjective === '' && updated.soap_note)) {
@@ -58,10 +81,21 @@ export default function DoctorPage() {
         }
     }
 
-    const selectPatient = (patient: TriageRecord) => {
+    const selectPatient = async (patient: TriageRecord) => {
         setSelectedPatient(patient);
         setEditedSoap(patient.soap_note ? { ...patient.soap_note } : { subjective: '', objective: '', assessment: '', plan: '' });
         setSaveStatus('');
+
+        // Mark as seen if not already
+        if (!patient.is_seen) {
+            try {
+                await triageRepository.markAsSeen(patient.id);
+                // Optimistic UI update
+                setQueue(prev => prev.map(p => p.id === patient.id ? { ...p, is_seen: true } : p));
+            } catch (e) {
+                console.error("Failed to mark as seen", e);
+            }
+        }
     };
 
     const handleSoapChange = (section: keyof SOAPNote, value: string) => {
@@ -189,20 +223,41 @@ export default function DoctorPage() {
                                         <div
                                             key={pt.id}
                                             onClick={() => selectPatient(pt)}
-                                            className={`p-4 rounded-xl border cursor-pointer transition-all transform hover:-translate-y-1 hover:shadow-md
+                                            className={`p-4 rounded-xl border cursor-pointer transition-all transform hover:-translate-y-1 hover:shadow-md relative
                                         ${selectedPatient?.id === pt.id ? 'ring-2 ring-primary border-transparent' : 'border-slate-100 hover:border-primary/30'}
                                         ${pt.status === 'finalized' ? 'opacity-60 bg-slate-50' : 'bg-white'}
                                     `}
                                         >
+                                            {!pt.is_seen && pt.status !== 'finalized' && (
+                                                <div className="absolute -top-1 -right-1 flex h-3 w-3">
+                                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                                                    <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+                                                </div>
+                                            )}
                                             <div className="flex justify-between items-start mb-2">
-                                                <h3 className="font-bold text-slate-900">Patient: {pt.patient_id}</h3>
+                                                <div className="flex flex-col">
+                                                    <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                                                        Patient: {pt.patient_id}
+                                                        {!pt.is_seen && <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.5 rounded font-black tracking-tighter">NEW</span>}
+                                                    </h3>
+                                                    <span className="text-slate-400 text-xs font-normal">({pt.patient_age || 'N/A'} yrs)</span>
+                                                </div>
                                                 <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border uppercase tracking-wider ${getRiskColor(pt.triage_tier)}`}>
                                                     {pt.triage_tier || 'Routine'}
                                                 </span>
                                             </div>
-                                            <div className="flex items-center justify-between text-xs text-slate-500">
-                                                <span className="flex items-center gap-1"><BrainCircuit size={12} /> {pt.specialty} Triage</span>
-                                                <span className="flex items-center gap-1"><Clock size={12} /> {new Date(pt.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                            <div className="flex items-center justify-between text-[10px] text-slate-500 mt-2">
+                                                <span className="flex items-center gap-1 font-bold uppercase tracking-tight text-slate-400"><BrainCircuit size={10} /> {pt.specialty}</span>
+                                                <span className="flex items-center gap-1 font-semibold">
+                                                    <Clock size={10} />
+                                                    {new Date(pt.created_at).toLocaleString([], {
+                                                        day: '2-digit',
+                                                        month: '2-digit',
+                                                        hour: '2-digit',
+                                                        minute: '2-digit',
+                                                        hour12: false
+                                                    })}
+                                                </span>
                                             </div>
                                         </div>
                                     )
@@ -221,6 +276,7 @@ export default function DoctorPage() {
                                     <div>
                                         <h2 className="text-xl font-bold flex items-center gap-2">
                                             {selectedPatient.patient_id}
+                                            <span className="text-slate-400 font-medium ml-1">({selectedPatient.patient_age || 'N/A'} yrs)</span>
                                             {selectedPatient.status === 'finalized' && <span className="bg-green-500/20 text-green-300 border border-green-500/50 text-xs px-2 py-0.5 rounded ml-2">Finalized</span>}
                                         </h2>
                                         <p className="text-slate-400 text-sm flex items-center gap-1 mt-1">
@@ -249,6 +305,7 @@ export default function DoctorPage() {
                                             <h4 className="text-xs font-bold text-amber-800 uppercase tracking-wider mb-2 flex items-center gap-2"><HeartPulse size={14} /> Nurse Vitals</h4>
                                             {selectedPatient.vitals ? (
                                                 <div className="grid grid-cols-3 gap-2 text-sm">
+                                                    <div><span className="text-slate-500">Age:</span> <span className="font-semibold">{selectedPatient.patient_age || 'N/A'}</span></div>
                                                     <div><span className="text-slate-500">BP:</span> <span className="font-semibold">{selectedPatient.vitals.blood_pressure_systolic}/{selectedPatient.vitals.blood_pressure_diastolic}</span></div>
                                                     <div><span className="text-slate-500">HR:</span> <span className="font-semibold">{selectedPatient.vitals.heart_rate}</span></div>
                                                     <div><span className="text-slate-500">Temp:</span> <span className="font-semibold">{selectedPatient.vitals.temperature}°C</span></div>

@@ -2,16 +2,15 @@
 
 ## Overview
 
-VaidyaSaarathi is a web-based clinical workflow application that streamlines patient intake, triage, and specialist review through role-based interfaces, automated AI analysis, and multi-language support. The system architecture follows a three-tier model with a React-based frontend, Python/FastAPI backend API, and PostgreSQL database with encrypted storage.
+VaidyaSaarathi is a web-based clinical workflow application that streamlines patient intake, triage, and specialist review through role-based interfaces, automated AI analysis, and multi-language support. The system architecture follows a three-tier model with a React-based frontend, Python/FastAPI backend API, and DynamoDB database with encrypted S3 storage.
 
 **PRIVACY-FIRST ARCHITECTURE:** All AI/ML models run locally on hospital-owned GPU servers. NO patient data leaves the hospital premises. The system is fully offline-capable, ensuring complete data sovereignty and HIPAA compliance without external dependencies.
 
 **AI/ML FRAMEWORK:** The system leverages Google's Health AI Developer Foundations (HAI-DEF) framework, which provides healthcare-specific AI models including MedGemma 4B for clinical SOAP note generation and HeAR (Health Acoustic Representations) for acoustic anomaly detection. Combined with OpenAI's Whisper for multi-language transcription, all models run locally on hospital infrastructure with zero external API dependencies.
 
-The application supports three primary user roles:
-- **Receptionists** perform patient identification (manual ID or QR scan), capture audio complaints in native languages, and provide localized instructions
-- **Nurses** enter clinical vitals and measurements that augment triage analysis
-- **Doctors** review prioritized patient queues filtered by specialty, edit AI-generated SOAP notes, and export finalized documentation to EHR systems
+The application supports two primary user roles:
+- **Nurses** perform complete patient intake including patient identification, vitals entry (BP, HR, SpO2, Temp, RR), and audio complaint recording in native languages. After submission, nurses receive basic vital check results and AI-generated first aid precautions for immediate care (NO triage zones or complete SOAP notes)
+- **Doctors** review prioritized patient queues filtered by specialty with complete AI-generated SOAP notes, triage tier assignments (EMERGENCY/URGENT/SEMI_URGENT/ROUTINE), acoustic deviation scores, edit SOAP notes, and export finalized documentation to EHR systems
 
 Key technical capabilities include:
 - Mock SSO authentication with JWT-based session management
@@ -642,11 +641,13 @@ class TriageRecord(BaseModel):
     language: str
     transcription: str
     translation: str
-    soap_note: 'SOAPNote'
+    soap_note: 'SOAPNote'  # Full SOAP note (doctor-facing only)
+    first_aid_precautions: Optional[str] = None  # Nurse-facing immediate care guidance
     vitals: Optional['VitalSigns'] = None
     risk_score: int
+    triage_tier: str  # 'EMERGENCY' | 'URGENT' | 'SEMI_URGENT' | 'ROUTINE' (doctor-facing only)
     specialty: str
-    status: str  # 'pending' | 'in_progress' | 'finalized' | 'exported'
+    status: str  # 'pending' | 'in_progress' | 'ready_for_review' | 'finalized' | 'exported'
     created_at: datetime
     updated_at: datetime
 
@@ -654,8 +655,10 @@ class TriageAnalysis(BaseModel):
     acoustic_anomalies: List['AcousticAnomaly']
     transcription: str
     translation: str
-    soap_note: 'SOAPNote'
+    soap_note: 'SOAPNote'  # Complete SOAP note for doctor
+    first_aid_precautions: str  # Immediate care guidance for nurse
     risk_score: int
+    triage_tier: str  # EMERGENCY | URGENT | SEMI_URGENT | ROUTINE
     specialty: str
 
 class AcousticAnomaly(BaseModel):
@@ -685,8 +688,10 @@ class TriageQueueItem(BaseModel):
     patient_name: str
     chief_complaint: str
     risk_score: int
+    triage_tier: str  # EMERGENCY | URGENT | SEMI_URGENT | ROUTINE
     specialty: str
     time_in_queue: int  # minutes
+    acoustic_deviation_score: Optional[float] = None  # HeAR score (0-10)
     last_visit_date: Optional[datetime] = None
     trend_alerts: List[str]
 ```
@@ -697,8 +702,10 @@ class TriageQueueItem(BaseModel):
 - Detect acoustic biomarkers using HeAR model (HAI-DEF) - LOCAL
 - Transcribe audio to text using Whisper (OpenAI) - LOCAL
 - Translate transcription using NLLB-200 or IndicTrans2 - LOCAL
-- Generate SOAP notes using MedGemma 4B (HAI-DEF) - LOCAL
-- Calculate risk scores based on clinical indicators
+- Generate complete SOAP notes using MedGemma 4B (HAI-DEF) - LOCAL (for doctor review)
+- Generate first aid precautions using MedGemma 4B - LOCAL (for nurse immediate care)
+- Calculate risk scores and assign triage tiers based on clinical indicators
+- Generate localized audio instructions using local TTS
 - Generate localized audio instructions using local TTS
 
 **Interface:**

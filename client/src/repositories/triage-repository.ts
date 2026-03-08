@@ -2,8 +2,28 @@ import { apiClient } from '../api/api-client';
 import { TriageRecord, SOAPNote, VitalSigns } from '../types';
 
 export const triageRepository = {
-    createTriage: async (formData: FormData): Promise<TriageRecord> => {
+    createTriage: async (formData: FormData, idempotencyKey?: string): Promise<TriageRecord> => {
         const response = await apiClient.post<TriageRecord>('/triage/', formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+                ...(idempotencyKey ? { 'X-Idempotency-Key': idempotencyKey } : {}),
+            },
+        });
+        return response.data;
+    },
+
+    createVitalsTriage: async (formData: FormData, idempotencyKey?: string): Promise<TriageRecord> => {
+        const response = await apiClient.post<TriageRecord>('/triage/vitals', formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data',
+                ...(idempotencyKey ? { 'X-Idempotency-Key': idempotencyKey } : {}),
+            },
+        });
+        return response.data;
+    },
+
+    uploadAudio: async (id: string, formData: FormData): Promise<TriageRecord> => {
+        const response = await apiClient.post<TriageRecord>(`/triage/audio/${id}`, formData, {
             headers: {
                 'Content-Type': 'multipart/form-data',
             },
@@ -41,5 +61,11 @@ export const triageRepository = {
     exportToEhr: async (id: string): Promise<{ status: string; message: string }> => {
         const response = await apiClient.post<{ status: string; message: string }>(`/triage/${id}/export`);
         return response.data;
+    },
+
+    markAsSeen: async (id: string): Promise<TriageRecord> => {
+        const response = await apiClient.post<TriageRecord>(`/triage/${id}/seen`);
+        return response.data;
     }
 };
+
