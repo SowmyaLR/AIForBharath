@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/components/AuthProvider';
 import { useRouter } from 'next/navigation';
 import { Stethoscope, Activity, CheckCircle2, ShieldAlert, LogOut, Clock, BrainCircuit, HeartPulse, Database } from 'lucide-react';
+import { AiStatusBadge } from '@/components/AiStatusBadge';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { triageRepository } from '@/repositories';
@@ -173,6 +174,7 @@ export default function DoctorPage() {
                             </Link>
                         </div>
                         <div className="flex items-center gap-4">
+                            <AiStatusBadge />
                             <div className="flex flex-col items-end">
                                 <span className="text-sm font-bold text-slate-900">{user.name}</span>
                                 <span className="text-xs font-semibold text-primary">{user.specialty} Specialist</span>

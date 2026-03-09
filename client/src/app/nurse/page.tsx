@@ -3,6 +3,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '@/components/AuthProvider';
 import { useRouter } from 'next/navigation';
 import { Mic, Square, Save, Activity, UploadCloud, Users, LogOut, Thermometer, Droplets, HeartPulse, Wind, AlertTriangle, Circle, Shield, Info, XCircle } from 'lucide-react';
+import { AiStatusBadge } from '@/components/AiStatusBadge';
 import { motion, AnimatePresence } from 'framer-motion';
 import { triageRepository, patientRepository } from '@/repositories';
 import { TriageRecord } from '@/types';
@@ -199,6 +200,7 @@ export default function NurseIntakePage() {
                             VaidyaSaarathi
                         </div>
                         <div className="flex items-center gap-4">
+                            <AiStatusBadge />
                             <span className="text-sm font-medium text-slate-600 bg-slate-100 px-3 py-1 rounded-full">{user.name}</span>
                             <button onClick={logout} className="text-slate-400 hover:text-red-500 transition-colors">
                                 <LogOut size={20} />
