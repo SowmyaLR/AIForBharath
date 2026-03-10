@@ -23,7 +23,7 @@ logging.basicConfig(
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from api import auth, patients, triage, ehr
+from api import auth, patients, triage, ehr, ai_status
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ app.include_router(auth.router)
 app.include_router(patients.router)
 app.include_router(triage.router)
 app.include_router(ehr.router)
+app.include_router(ai_status.router)
 
 
 @app.get("/")
@@ -108,7 +109,8 @@ async def health_check():
             resp = sm.describe_endpoint(EndpointName=medgemma_endpoint)
             ep_status = resp.get("EndpointStatus", "Unknown")
             status["sagemaker_endpoint"] = ep_status
-            if ep_status != "InService":
+            # Allow "Updating" as a healthy status to prevent ALB 503s during asynchronous scale-up
+            if ep_status not in ["InService", "Updating"]:
                 http_status = 503
         except Exception as e:
             status["sagemaker_endpoint"] = f"error: {str(e)[:120]}"

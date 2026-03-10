@@ -948,6 +948,29 @@ MedGemma 4B on A10G GPU (24GB VRAM): ~8.3 seconds
 
 ---
 
+#### 4. Cost-Optimized AI Infrastructure (Scale-to-Zero)
+
+**Problem**: Professional medical LLMs like MedGemma require high-end A10G GPUs (~$1.00/hour). Keeping these active 24/7 is prohibitively expensive for a hackathon or rural pilot.
+
+**Solution**: We use **SageMaker Asynchronous Inference** with a **Scale-to-Zero** policy. This reduces GPU costs by ~85% by only paying for active inference time.
+
+**Cold Start Overhead**:
+- When the GPU is at zero instances, starting the **Text Generation Inference (TGI)** container takes approximately **5 minutes**.
+- Subsequent requests while the GPU is "warm" take < 10 seconds.
+
+**Instructions for Judges**:
+- Please check the **AI Status Badge** in the top navigation bar.
+- If the status is `Amber (Warming Up)`, please wait for the status to turn `Green (Ready)` before starting a triage case.
+- The system automatically triggers a "wake-up" when you first load the page.
+
+| Status | Color | Impact |
+|--------|--------|-------|
+| **Ready** | 🟢 Green | Instant results |
+| **Warming Up** | 🟡 Amber | 5-minute boot in progress |
+| **Sleeping** | 🔵 Blue | Will wake up on visit |
+
+---
+
 ### Throughput Capacity
 
 **Current Configuration**:

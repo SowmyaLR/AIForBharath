@@ -443,7 +443,7 @@ fields @timestamp, triage_id, zone
 | Service | Configuration | Daily | 12-Day Total |
 |---|---|---|---|
 | ECS Fargate | 1 task (FastAPI + Whisper + HeAR in-container), 12 hrs/day | $0.40 | $4.80 |
-| SageMaker Async | ml.g5.xlarge — 100% Scale-to-Zero | $0.00* | ~$5.00 |
+| SageMaker Async | ml.g5.xlarge — **Scale-to-Zero (10 min idle timeout)** | ~$0.15* | ~$1.80 |
 | ALB | 1 load balancer | $0.60 | $7.20 |
 | CloudFront + WAF | < 1M requests | $0.10 | $1.20 |
 | Amplify Hosting | Build + SSR | $0.10 | $1.20 |
@@ -451,19 +451,25 @@ fields @timestamp, triage_id, zone
 | S3 | ~1 GB audio/day | $0.10 | $1.20 |
 | Lambda | ~100 invocations/day | $0.02 | $0.24 |
 | CloudWatch | Logs + alarms | $0.20 | $2.40 |
-| **Total** | | **~$1.57/day** | **~$19 (12 days)** |
+| **Total** | | **~$1.72/day** | **~$20.64 (12 days)** |
 
-### MedGemma Real-Time Endpoint Cost Model
+### MedGemma Production Cost Model (Scale-to-Zero)
 
 ```
-Instance: ml.g5.xlarge
-On-demand rate: $1.408/hr (ap-south-1)
+Instance: ml.g5.xlarge ($1.408/hr in ap-south-1)
+Strategy: Asynchronous Inference with Scale-to-Zero
 
-Scheduled operation (Automated Scale-to-Zero):
-  Average usage (1 hr/day active) = $1.408/day
-  Idle time (23 hrs/day) = $0.00/day
-  Total: ~$1.41/day
-  Saving vs Real-Time: **~$32.38/day saved**
+Traditional Real-Time (24/7):
+  $1.408 * 24 hrs = $33.79/day ($1,013/month)
+
+Asynchronous Scale-to-Zero (High Usage - 200 patients/day):
+  Active Inference Time: ~1.5 hrs/day
+  Idle Warm-up Penalty (10m x ~12 wake-ups): ~2 hrs/day
+  Total Billed Time: 3.5 hrs/day
+  Daily Cost: $4.92/day
+  Monthly Cost: ~$147/month
+
+Net Savings: ~85% Cost Reduction ($1,013 -> $147)
 ```
 
 > **Note:** GPU compute for MedGemma is the dominant cost driver (~91% of total). Use AWS credits to cover this. The endpoint is the exact confirmed-working configuration — no changes to model, container, or instance type.
