@@ -127,18 +127,6 @@ VaidyaSaarathi is built with a **production-grade cost-optimization strategy** c
 2.  **Subsequent Hits (Warm State)**: Once the GPU is awake, all subsequent triage requests will process in **< 20 seconds**.
 3.  **Automatic Shutdown**: The system will automatically return to sleep after 10 minutes of inactivity to save costs.
 
-### **How to Monitor Progress**
-
-If you have AWS CLI access, you can monitor the "Wake Up" progress in real-time:
-```bash
-aws sagemaker describe-endpoint \
-  --endpoint-name vaidyasaarathi-demo-v2-medgemma-endpoint \
-  --query "[EndpointStatus, ProductionVariants[0].DesiredInstanceCount]"
-```
-*   `["InService", 0]` -> System is sleeping (Saving $1.40/hr)
-*   `["Updating", 1]` -> **GPU is Waking Up!** (Please wait 4-5 mins)
-*   `["InService", 1]` -> **System is Ready!** (Fast results)
-
 > [!TIP]
 > This architecture reduces our operational burn rate by **95%**, saving approximately **$1,000/month** in production while maintaining 100% data privacy within our VPC.
 
